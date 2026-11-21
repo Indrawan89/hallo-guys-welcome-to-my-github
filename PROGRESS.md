@@ -93,3 +93,46 @@ news-image-20261120 --repo-url https://github.com/Indrawan89/makefun-news-image-
 --keypair <file>`), dengan repo About diisi deskripsi + homepage
 `https://make.fun/bounty/news-image-20261120` + topik
 `makefun,ai-agents,bounties,growth` sesuai `repo_about` di requirements.
+
+## Perbaikan 21 Nov 2026 (~11:23 WIB): generator stdlib-only + `makefun compress`
+
+`makefun check` gagal 2 hal pada entry lama: (1) `thinking_reproduces` hanya
+10,4% baris yang ditulis agen (butuh ≥30%), karena `main.py` lama berisi
+~2097 baris base64 PNG yang dibuat via exec, bukan via write/edit;
+(2) `license_osi`: LICENSE tidak punya baris SPDX-License-Identifier.
+Perbaikan mengikuti solusi resmi di competition.yaml/RULES.txt kit:
+
+- **`poster.py` (359 baris, 14.705 byte, sha256
+  `d111d9ca78c8a40141b5a6736e03add131b175b035e7ff987b5d87277462b15b`)** —
+  source generator baru yang ditulis agen via write/edit di sesi ini.
+  Python 3.13, HANYA standard library (`os`, `struct`, `zlib`): encoder PNG
+  buatan sendiri (IHDR + IDAT zlib + IEND), font bitmap 5x7 buatan sendiri
+  (A–Z, 0–9, tanda baca), primitif gambar (persegi, teks, bendera AS /
+  Tiongkok / Rusia yang digambar), tanpa network, tanpa random/waktu —
+  deterministik. Menulis ke `MAKEFUN_OUTPUT_DIR` (default `/output`) +
+  `/entry.png`. Isi poster sama persis dengan desain di atas (masthead navy +
+  garis emas, hero Shenzhen, grid 2x3 enam berita, footer ALSO + atribusi).
+- **`main.py` (4.363 byte, sha256
+  `a6dc5ed12c52737de9c00e311efed5a1e818cad6a61684f1560d0dc17049b210`)** —
+  hasil `makefun compress` (kit CLI, stub makefun-compress/v1 + stream LZMA
+  dari `poster.py`), dijalankan sebagai command tersendiri sesudah source
+  ditulis. Pasangan source↔entry tercatat di `~/.makefun/compress.json`.
+  Check menghitung baris `poster.py` sebagai pengganti baris `main.py`.
+- **`LICENSE`** — ditambah baris `SPDX-License-Identifier: MIT` (via edit
+  di sesi ini), lisensi MIT, copyright 2026 Indrawan89.
+- **`entry.png` lama (156.306 byte, dari Pillow/build_image.py) tetap ada
+  sebagai referensi audit; `build_image.py` tetap ada sebagai build script
+  lokal.** Keduanya bukan lagi bagian dari eksekusi entry.
+
+## Hasil verifikasi arsitektur baru (21 Nov 2026, ~11:23 WIB)
+
+- `python3 main.py` (hasil compress) dijalankan **2x** dengan
+  `MAKEFUN_OUTPUT_DIR` berbeda (`/tmp/out1`, `/tmp/out2`): kedua run
+  menghasilkan PNG **1024x1024 RGB, 18.541 byte (< 1 MiB), sha256 identik
+  `e7f239c9370f0c5abb8fe19bbbe983d6e2603e1b9a49a51b685f59fca6405553`**,
+  dan byte-identik dengan render langsung `python3 poster.py` → deterministik.
+- Gambar hasil render diperiksa visual: semua teks besar dan terbaca, tidak
+  ada yang terpotong / tumpang tindih — masthead, hero + 3 bendera, grid 2x3
+  (ICJ, Kyiv, Anthropic, Microsoft, Haiti, Akvan), footer ALSO 2 baris +
+  atribusi sumber 2 baris, semua muat di dalam panel masing-masing.
+- `README.md`, `.makefun/owner.json`, `entry.png` tidak diubah.
