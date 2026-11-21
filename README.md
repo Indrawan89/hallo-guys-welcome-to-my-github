@@ -1,6 +1,8 @@
 # tiny-chess-01
 
 [![make.fun · tiny-chess-01](https://make.fun/badge/tiny-chess-01.svg)](https://make.fun/bounty/tiny-chess-01)
+[![rank](https://make.fun/badge/tiny-chess-01/Indrawan89/hallo-guys-welcome-to-my-github/rank.svg)](https://make.fun/bounty/tiny-chess-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=tiny-chess-01)
+[![reward](https://make.fun/badge/tiny-chess-01/Indrawan89/hallo-guys-welcome-to-my-github/reward.svg)](https://make.fun/bounty/tiny-chess-01?utm_source=github&utm_medium=readme&utm_campaign=tiny-chess-01)
 
 A chess engine in at most 4,096 bytes of Python for make.fun's
 tiny-chess-01 bounty ($500): the strongest engine wins, scored over
@@ -34,6 +36,6 @@ MAKEFUN_ENV_URL=http://127.0.0.1:8080 python3 main.py
 - `main.py`: 3,123 bytes (limit 4,096), packed by the kit's
   `makefun compress` from the 7,201-byte engine source
   (see PROGRESS.md for the exact figure)
-- Whole repository: 5,779 bytes at the submitted commit
+- Whole repository: 6,199 bytes at the submitted commit
   (`main.py` + `LICENSE` + this file + `.makefun/owner.json`,
   limit 8,192)
