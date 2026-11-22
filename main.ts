@@ -1,12 +1,44 @@
-const fs=require('fs'),C='udlr',U=n=>new Uint8Array(n);let Q;
-function P(t){let r=t.split('\n'),W=Math.max(...r.map(l=>l.length))+2;Q=[-W,W,-1,1];let N=W*(r.length+2),w=U(N).fill(1),g=[],b=[],y=-1;for(let j in r)for(let x in r[j]){let c=r[j][x],i=(+j+1)*W+ +x+1,k=' .$*@+'.indexOf(c);if(k>=0){w[i]=0;if(k&1)g.push(i);if(k>1&&k<4)b.push(i);if(k>3)y=i;}}return[W,N,w,g,b,y];}
-function F(W,N,w,o,s,c){let v=[],n=U(N),q=[s];n[s]=1;for(let e of q)for(let k=0;k<4;k++){let m=e+Q[k];if(n[m]|w[m]|(o&&!o[m])|c.has(m))continue;n[m]=1;v[m]=e*4|k;q.push(m);}return[v,n];}
-function A(v,f,t){if(f==t)return'';if(v[t]==null)return null;let s='',e=t;for(let p;e!=f;e=p>>2){p=v[e];s=C[p&3]+s;}return s;}
-function D(W,N,w,o,k,g){let l=U(N),q=g.slice();for(let z of g)l[z]=1;for(let t of q)for(let d in Q){let p=t-Q[d],n=p-Q[d];if(!l[p]&w[p]<1&(o?o[p]:1)&(k?k[n]:1)){l[p]=1;q.push(p);}}return U(N).map((_,i)=>!l[i]&(o?o[i]:1));}
-function Z(W,w,b,g){for(let e of b){let x=e%W,y=e/W|0;for(let k in Q){let a=x-(k&1),c=y-(k>>1),ok=1,has=0;for(let j in Q){let m=(c+(j>>1))*W+a+(j&1);if(b.includes(m)){has=1;ok=!g.includes(m)&&ok;}else ok&=w[m];}if(ok&&has)return 1;}}return 0;}
-function S(W,N,w,o,k,b0,g,p){let d=D(W,N,w,o,k,g);for(let b of b0)if(d[b])return null;let I=a=>a.every(c=>g.includes(c)),st=b0.slice().sort();if(I(st))return{m:'',e:p};let q=[[st,p,'']],v={},Y=(a,pl)=>F(W,N,w,k,pl,new Set(a))[1].indexOf(1);v[st+'|'+Y(st,p)]=1;let e=0;for(let[bx,pl,mv]of q){if(++e>250000)return null;let O=new Set(bx),f=F(W,N,w,k,pl,O);for(let bi in bx){let b=bx[bi];for(let dd in Q){let pc=b-Q[dd],tc=b+Q[dd];if(!f[1][pc]|w[tc]|(o&&!o[tc])|O.has(tc)|d[tc])continue;let wk=A(f[0],pl,pc);if(wk==null)continue;let nb=bx.slice();nb[bi]=tc;nb.sort();if(Z(W,w,nb,g))continue;let nm=mv+wk+C[dd];if(I(nb))return{m:nm,e:b};let kk=nb+'|'+Y(nb,b);if(!v[kk])v[kk]=1,q.push([nb,b,nm]);}}}return null;}
-function R(lv){let[W,N,w,g,b,y]=lv;if(y<0)return null;let hy=y/W|0,sn=U(N),rm=[];for(let i=0;i<N;i++){let yy=i/W|0;if(w[i]|sn[i]|yy==hy)continue;let cp=[],q=[i];sn[i]=1;for(let c of q){cp.push(c);for(let d in Q){let n=c+Q[d];if(w[n]|sn[n]|(n/W|0)==hy)continue;sn[n]=1;q.push(n);}}let rb=cp.filter(c=>b.includes(c)),rg=cp.filter(c=>g.includes(c));if(rb.length!=rg.length)return null;if(!rb.length)continue;let dr=-1,en=-1;for(let c of cp)for(let d in Q){let n=c+Q[d];if((n/W|0)==hy&&!w[n]){if(dr>=0)return null;dr=c;en=n;}}if(dr<0)return null;let o=U(N),k=U(N);for(let c of cp)o[c]=k[c]=1;k[en]=1;rm.push({o,k,b:rb,g:rg,d:dr,e:en});}if(!rm.length)return null;let nb=0,ng=0;for(let r of rm)nb+=r.b.length,ng+=r.g.length;if(nb!=b.length||ng!=g.length)return null;rm.sort((a,b)=>a.d-b.d);return rm;}
-function T(lv,rm,sv){let[W,N,w,g,b,y]=lv,cb=b.slice(),cp=y,o='',s=0;for(let r of rm){let f=F(W,N,w,null,cp,new Set(cb)),wk=A(f[0],cp,r.e);if(wk==null)return null;o+=wk+sv[s].m;cb=cb.filter(x=>!r.b.includes(x)).concat(r.g);cp=sv[s++].e;}return o;}
-function L(lv){let[W,N,w,g,b,y]=lv;if(b.every(c=>g.includes(c)))return'';let rm=R(lv);if(rm){let sv=[];for(let r of rm){let s=S(W,N,w,r.o,r.k,r.b,r.g,r.e);if(!s){sv=null;break;}sv.push(s);}if(sv){let st=T(lv,rm,sv);if(st!=null)return st;}}return(S(W,N,w,null,null,b,g,y)||{m:''}).m;}
-function M(){let I=process.env.MAKEFUN_INPUT_DIR||'/input',O=process.env.MAKEFUN_OUTPUT_DIR||'/output';for(let id of fs.readdirSync(I)){let s='';try{s=L(P(''+fs.readFileSync(I+'/'+id+'/level.txt')));}catch{}fs.mkdirSync(O+'/'+id,{recursive:true});fs.writeFileSync(O+'/'+id+'/solution.txt',s);}}
-M();
+// main.ts — harness driver for the csv-reader-speed entry.
+//
+// Node 22 runs `node /bot/main.ts`. This file is written in plain
+// JavaScript syntax (no TypeScript-only constructs) so Node's type
+// stripping accepts it as-is. It reads every case from
+// /input/cases.json, answers each with run() from solve.js, and writes
+// /output/answers.json.
+//
+// CSV_INPUT / CSV_OUTPUT may override the paths for local testing; the
+// harness defaults are the spec paths.
+import { setFlagsFromString } from 'node:v8';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+setFlagsFromString('--no-incremental-marking');
+
+const { run } = await import('./solve.js');
+
+const inputPath = process.env.CSV_INPUT || '/input/cases.json';
+const outputPath = process.env.CSV_OUTPUT || '/output/answers.json';
+
+const cases = JSON.parse(readFileSync(inputPath, 'utf8'));
+const answers = cases.map((c) => run(c.input));
+mkdirSync(dirname(outputPath), { recursive: true });
+// Serialize the answers without a single top-level JSON.stringify: the
+// native stringifier is measurably slower when it must walk the whole
+// object graph (6 answer objects, each with columns/rows/errors) than
+// when it is handed each flat section — columns (string[] | null), rows
+// (string[][]) and errors (small objects) — separately, with the small
+// skeleton assembled here. The bytes produced are identical to
+// JSON.stringify(answers) (verified on the practice set), and the
+// comparison is by parsed JSON values anyway, so only the values matter;
+// the serializer is deterministic, so the two harness executions still
+// write byte-identical outputs.
+let out = '[';
+for (let a = 0; a < answers.length; a++) {
+  const ans = answers[a];
+  out += '{"columns":' + (ans.columns === null ? 'null' : JSON.stringify(ans.columns))
+    + ',"rows":' + JSON.stringify(ans.rows)
+    + ',"errors":' + JSON.stringify(ans.errors) + '}';
+  if (a + 1 < answers.length) out += ',';
+}
+out += ']';
+writeFileSync(outputPath, out);
