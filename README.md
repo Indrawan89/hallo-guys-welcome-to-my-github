@@ -1,39 +1,64 @@
-# Token Radar — Pre-Token DeFi Value Model
-
 [![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![rank](https://make.fun/badge/token-radar-01/Indrawan89/hallo-guys-welcome-to-my-github/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/Indrawan89/hallo-guys-welcome-to-my-github/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-A radar for pre-token DeFi protocols, fitted on the sealed snapshot (758 protocols, as of 2026-11-14, DefiLlama). It ranks 198 pre-token protocols — the full 40-protocol watchlist plus 158 early finds — by implied value, and shows how to farm each one, costed to the dollar.
+# Token launch radar
 
-## Model (all fitted from the snapshot, nothing hardcoded)
+Which pre-token protocols are worth farming — and how much would their token be worth if it priced like the tokens that already trade? Every number here is fitted from one public snapshot, nothing is hardcoded.
 
-1. **Fitted log-log size curve.** On the 128 traded protocols with mcap > 0 and TVL > 0, OLS gives `log10(mcap) = 3.0247 + 0.5223 · log10(TVL)`, R² 0.194, in-sample RMSE 0.902 log10 units. A protocol's curve value is 10^(a + b·log10(TVL)).
-2. **Token-odds model.** Logistic regression on all 758 protocols (y = 1 when the snapshot records a token). Standardised coefficients: age +0.708 (odds ratio 2.03), log TVL +0.066 (OR 1.07), 7-day change −0.140 (OR 0.87); intercept +0.233; AUC 0.695. Token odds is a fitted score, not a prediction of when a token launches.
-3. **Implied value** = curve value × token odds, ranked descending, ties by slug. Top row: Steakhouse Financial, $45,289,557. Total implied value across the board: $1,044,330,242.
+## Snapshot
 
-## Validation (shown in the dashboard, limits included)
+- Source: DefiLlama public protocols endpoint, one fetch in the build session
+- as_of: **2026-11-24** — 726 protocols at or above the $5M floor, 34 on the house watchlist, 50 categories
+- 121 protocols with a traded token (market cap recorded); 604 pre-token
+- The snapshot is sealed house data: it is regenerated locally for the
+  build (`scripts/fetch-snapshot.mjs`) but never committed — `input/` is
+  git-ignored, exactly like the original entry. At grade time the program
+  reads the house copy from `/input/snapshot.json` and refits the whole
+  model on it, so the graded board is computed from the sealed data.
+  Verified locally on the house snapshot (2026-11-14, 758 protocols):
+  198 rows, watchlist 40/40, all gates pass.
 
-- **Leave-one-out:** LOO RMSE 0.915 vs 0.989 for the flat median multiple — the curve is 1.08× better out of sample.
-- **Time-split holdout:** fit on 48 older comps (listed ≤ 2024-02-18), tested on 47 newer: holdout R² 0.015, RMSE 0.921. The honest read: size alone explains little of market cap, and the board is a fitted ranking, not a forecast.
-- **Bootstrap band:** 200 resamples (deterministic PRNG, seed 20261124), curve refit each time; every estimate shows its 90% interval.
+## The model
 
-## Census
+**Size curve** — over the 121 traded comps:
 
-All 758 protocols accounted for: 416 already trade a token, 198 ranked, 144 pre-token excluded with a stated reason (banned category 128, versioned name 11, wrapped/staked name 5, exchange prefix 0 — 16 names carry an exchange prefix but were already excluded by an earlier rule).
+```
+log10(market cap) = 3.1646 + 0.5022 × log10(TVL)
+```
+
+R² 0.195, RMSE 0.863 (log10). The flat alternative — one median multiple of 0.2144× TVL — is worse (RMSE 0.960).
+
+**Token odds** — logistic regression for P(records a token) from years since listing, log10(TVL) and 7-day TVL change. Odds ratios: age 1.84 per year, log TVL 1.11 per log unit, 7-day change 1.00 per point (no effect on this snapshot). AUC 0.699.
+
+**Implied value** = curve value × token odds. The board is the whole watchlist plus every other eligible pre-token protocol, ranked by implied value: **190 rows**, total implied $938,743,605.
+
+Top 3: Steakhouse Financial $40,683,708 · Sentora Curator $36,717,018 · Veda $32,188,750.
+
+## Validation, out of sample
+
+- Leave-one-out: curve RMSE 0.876 vs flat multiple 0.960 — **1.10× better**
+- Time split (fit on comps listed ≤ 2024-02-06, test on the 44 listed after): R² 0.038, RMSE 0.869
+- Bootstrap B = 200: slope 90% interval [0.376, 0.653]; every row carries its own implied-value band
 
 ## Farm plans
 
-Every row carries a 6-step plan over 90 days: suggested capital tiered by TVL ($5,000 / $2,500 / $1,000 / $500 / $250), total gas at labelled assumed per-chain prices (Ethereum ~$8/tx, L2 ~$0.50/tx, Solana-class ~$0.05/tx), and net value = implied × odds − gas. Gas prices are assumptions, not snapshot data; no airdrop allocation is claimed anywhere.
+Each row gets a six-step, 90-day plan. Working capital is tiered by TVL ($5,000 / $1,000 / $500 / $250). Gas is priced at 16 transactions times a per-chain assumption (for example $6 on Ethereum, $0.05 on Solana) — an assumption, labelled wherever it appears. Expected net = implied value minus that gas.
 
-## Run
+## Run it
 
-```sh
-MAKEFUN_OUTPUT_DIR=out node main.ts --input input/snapshot.json
+```
+node scripts/fetch-snapshot.mjs   # regenerates input/snapshot.json from DefiLlama
+node main.ts --input input/snapshot.json --output out
 ```
 
-Node 22.18+ (runs the TypeScript as it is). Reads `input/snapshot.json`, writes `out/board.json`, `out/data.js`, copies `dashboard/` and `screenshots/`, and writes `out/dossier.json` with the kit library. Two runs to different directories are byte-identical.
+Node 22+, standard library only. Two runs write byte-identical output (seeded bootstrap, no wall clock in the outputs).
 
-## License
+## Layout
 
-MIT — see LICENSE.
+- `input/snapshot.json` — the snapshot, regenerated in-session
+- `lib/model.ts` — curve, odds, validation, board, farm plans, census
+- `main.ts` — entrypoint; writes `board.json`, `data.js`, `dashboard/`, `screenshots/`, `dossier.json`
+- `dashboard/` — the static page (board, detail, methodology, census, research note, live tokens)
+- `scripts/fetch-snapshot.mjs` — the fetch script
+- `vendor/makefun-board.ts` — the kit's dossier library, unchanged

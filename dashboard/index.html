@@ -3,77 +3,85 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar — Pre-Token DeFi Value Model</title>
+<title>Token launch radar — value from the snapshot's own figures</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <header class="top">
-  <div class="wrap">
-    <h1>Token Radar</h1>
-    <p class="sub">Pre-token DeFi value model — fitted on the snapshot's own traded tokens. Snapshot as of <span id="asOf">—</span>, 758 protocols, floor $50M.</p>
-    <div class="kpis" id="kpis"></div>
+  <div class="titleblock">
+    <h1>Token launch radar</h1>
+    <p class="sub">Which pre-token protocols would be worth farming if their token priced like the tokens that already trade — fitted from one public snapshot, nothing hardcoded.</p>
+    <p class="meta" id="metaLine">Loading snapshot…</p>
   </div>
+  <div class="kpis" id="kpis"></div>
 </header>
-<nav class="tabs wrap" id="tabs">
-  <button data-tab="board" class="on">Board</button>
+<nav class="tabs" id="tabs">
+  <button data-tab="board" class="active">Board</button>
+  <button data-tab="detail">Detail</button>
   <button data-tab="method">Methodology</button>
-  <button data-tab="census">Census 758</button>
+  <button data-tab="census">Census</button>
   <button data-tab="research">Research note</button>
   <button data-tab="live">Live tokens</button>
 </nav>
-<main class="wrap">
-  <section id="view-board" class="view">
+<main>
+  <section id="tab-board" class="tab active">
     <div class="controls">
-      <input id="q" type="search" placeholder="Search name or slug…" aria-label="Search">
-      <select id="scope" aria-label="Scope">
+      <input id="q" type="search" placeholder="Filter by name or slug…" aria-label="Filter by name or slug">
+      <select id="fScope" aria-label="Filter by scope">
         <option value="">All scopes</option>
         <option value="watchlist">Watchlist</option>
         <option value="early">Early finds</option>
       </select>
-      <select id="cat" aria-label="Category"><option value="">All categories</option></select>
-      <select id="chain" aria-label="Chain"><option value="">All chains</option></select>
-      <span id="count" class="count"></span>
+      <select id="fCat" aria-label="Filter by category"><option value="">All categories</option></select>
+      <select id="fChain" aria-label="Filter by chain"><option value="">All chains</option></select>
+      <span id="countLine" class="count"></span>
     </div>
-    <div id="detail"></div>
-    <div class="tablewrap"><table id="board">
-      <thead><tr>
-        <th data-k="rank">Rank</th><th data-k="name">Protocol</th><th data-k="category">Category</th>
-        <th data-k="chains">Chains</th><th data-k="tvl_usd">TVL</th><th data-k="change_7d">7d %</th>
-        <th data-k="curve_value_usd">Curve value</th><th data-k="token_odds">Token odds</th>
-        <th data-k="implied_value_usd">Implied value</th><th data-k="band">90% band</th>
-      </tr></thead>
-      <tbody id="rows"></tbody>
-    </table></div>
-    <p class="note">Implied value = fitted curve value × token odds. Ranks by implied value, ties broken by slug. Token odds is a fitted score from the snapshot — not a prediction of when a token launches.</p>
+    <div class="tablewrap">
+      <table id="boardTable">
+        <thead>
+          <tr>
+            <th data-sort="rank">Rank</th>
+            <th data-sort="name">Protocol</th>
+            <th data-sort="scope">Scope</th>
+            <th data-sort="category">Category</th>
+            <th data-sort="tvl_usd">TVL</th>
+            <th data-sort="implied_value_usd">Implied value</th>
+            <th data-sort="odds">Token odds</th>
+            <th data-sort="band">90% band</th>
+          </tr>
+        </thead>
+        <tbody id="boardBody"></tbody>
+      </table>
+    </div>
+    <p class="hint">Click a column header to sort. Click a protocol name for its detail page, farm plan and nearest traded comps.</p>
   </section>
-  <section id="view-method" class="view" hidden>
-    <h2>Methodology</h2>
-    <div id="method"></div>
-    <h3>Median mcap / TVL multiple by category (traded comps)</h3>
-    <div class="tablewrap"><table id="catTable">
-      <thead><tr><th>Category</th><th>Comps</th><th>Median multiple</th></tr></thead>
-      <tbody id="catRows"></tbody>
-    </table></div>
+  <section id="tab-detail" class="tab">
+    <div id="detailBody"><p class="hint">Pick a protocol from the Board tab to see its model breakdown, bootstrap band, nearest comps and farm plan.</p></div>
   </section>
-  <section id="view-census" class="view" hidden>
-    <h2>Census — all 758 protocols accounted for</h2>
-    <div id="census"></div>
+  <section id="tab-method" class="tab">
+    <h2>How the numbers are made</h2>
+    <div id="methodBody"></div>
   </section>
-  <section id="view-research" class="view" hidden>
-    <h2>Research note</h2>
-    <div id="research" class="prose"></div>
+  <section id="tab-census" class="tab">
+    <h2>Census — every protocol in the snapshot, accounted for</h2>
+    <div id="censusBody"></div>
   </section>
-  <section id="view-live" class="view" hidden>
-    <h2>Live tokens — already trading (not ranked)</h2>
-    <p class="note">These protocols already record a token, so they are comparables, not ranking candidates. Shown with market cap from the snapshot.</p>
-    <div class="tablewrap"><table id="liveTable">
-      <thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>Multiple</th></tr></thead>
-      <tbody id="liveRows"></tbody>
-    </table></div>
+  <section id="tab-research" class="tab">
+    <h2>Research note — what the fit says, and what it does not</h2>
+    <div id="researchBody"></div>
+  </section>
+  <section id="tab-live" class="tab">
+    <h2>Live tokens — the traded comps the curve is fitted on</h2>
+    <div class="tablewrap">
+      <table id="liveTable">
+        <thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>Multiple</th><th>7d change</th><th>Listed</th></tr></thead>
+        <tbody id="liveBody"></tbody>
+      </table>
+    </div>
   </section>
 </main>
-<footer class="wrap foot">
-  <p>Model fitted from the sealed snapshot only. Gas prices are labelled assumptions, not snapshot data. Token odds is a fitted score, not a launch-date prediction. No airdrop allocation is claimed anywhere — the snapshot carries none.</p>
+<footer>
+  <p>Data: DefiLlama public protocols endpoint (api.llama.fi/protocols), one fetch, snapshot date shown above. Gas figures in farm plans are assumptions, not measured fees. Nothing here is investment advice.</p>
 </footer>
 <script src="../data.js"></script>
 <script src="app.js"></script>

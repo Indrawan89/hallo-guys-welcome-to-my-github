@@ -1,9 +1,23 @@
-// Token-radar rebuild: fitted log-log size curve x token-odds model.
+// model.ts — the token-radar value model, fitted from the snapshot alone.
 //
-// Everything here is fitted from the sealed snapshot (758 protocols,
-// as_of 2026-11-14). No hardcoded protocol names, no invented numbers:
-// the fit, the validation and the census are all computed below from
-// the snapshot bytes and reported with their own statistics.
+// Everything here is computed from input/snapshot.json at run time: no
+// hardcoded protocol names, no hardcoded multiples. The model has two parts:
+//
+//   1. A fitted log-log size curve: log10(market cap) ~ log10(TVL) over the
+//      protocols whose token already trades. A pre-token protocol's curve
+//      value is what its token would be worth if it priced like the traded
+//      comps of its size.
+//   2. A token-odds model: logistic regression for P(records a token) from
+//      how long a protocol has run without one, its (log) TVL and its 7-day
+//      TVL change. A pre-token protocol's implied value is
+//      curve value x token odds.
+//
+// Validation shown on the dashboard: leave-one-out error of the curve
+// against a flat-median-multiple baseline, a time-split holdout (fit on
+// older listings, test on newer ones), and bootstrap bands (B = 200).
+//
+// All randomness is seeded (mulberry32), so two runs of main.ts write the
+// same bytes.
 
 export interface Protocol {
   slug: string;
@@ -26,51 +40,437 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-export interface SizeCurveFit {
+export interface CurveFit {
   n: number;
-  a: number;
-  b: number;
+  a: number; // intercept: log10(mcap) = a + b * log10(tvl)
+  b: number; // slope
   r2: number;
   rmse: number;
-  residualSd: number;
-  flatMedianMultiple: number;
+  residSd: number;
+  flatMultiple: number; // median(mcap / tvl) over the same comps
+  flatRmse: number; // RMSE of the flat multiple, in log10 space
+}
+
+export interface OddsModel {
+  n: number;
+  nPositive: number;
+  intercept: number; // raw-scale coefficients (see fitTokenOdds)
+  coefAge: number; // per year without a token
+  coefLogTvl: number; // per unit of log10(TVL)
+  coefChange: number; // per percentage point of 7-day change
+  orAge: number;
+  orLogTvl: number;
+  orChange: number;
+  auc: number;
+  medianAge: number; // years, used when listed_at is missing
+  meanAge: number;
+  meanLogTvl: number;
+  meanChange: number;
+  sdAge: number;
+  sdLogTvl: number;
+  sdChange: number;
 }
 
 export interface LooResult {
   rmse: number;
   flatRmse: number;
-  oosMultiple: number;
+  ratio: number; // flatRmse / rmse: how many times better the curve is
 }
 
-export interface TimeSplitResult {
-  medianListedAt: string;
-  trainN: number;
-  testN: number;
-  trainA: number;
-  trainB: number;
-  holdoutR2: number;
-  holdoutRmse: number;
+export interface HoldoutResult {
+  cutoff: string; // median listed_at among comps
+  nFit: number;
+  nTest: number;
+  a: number;
+  b: number;
+  r2: number;
+  rmse: number;
 }
 
-export interface TokenOddsFit {
-  // Standardised logistic coefficients, in feature order
-  // [age_days, log10(tvl_usd), change_7d clamped to [-50, 50]].
-  weights: number[];
-  intercept: number;
-  oddsRatios: number[];
-  featureMeans: number[];
-  featureSds: number[];
-  auc: number;
-  iterations: number;
-  learningRate: number;
+export interface BootstrapResult {
+  b: number;
+  aLo: number;
+  aHi: number;
+  bLo: number;
+  bHi: number;
+  pairs: { a: number; b: number }[];
 }
 
-export interface Comparable {
-  slug: string;
-  name: string;
-  tvl_usd: number;
-  mcap_usd: number;
-  multiple: number;
+// Deterministic PRNG (mulberry32). Same seed -> same sequence, every run.
+export function mulberry32(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function log10(x: number): number {
+  return Math.log(x) / Math.LN10;
+}
+
+function median(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length;
+  if (m === 0) return NaN;
+  return m % 2 === 1 ? s[(m - 1) / 2] : (s[m / 2 - 1] + s[m / 2]) / 2;
+}
+
+function mean(xs: number[]): number {
+  return xs.reduce((a, b) => a + b, 0) / xs.length;
+}
+
+function sd(xs: number[], mu: number): number {
+  const v = xs.reduce((a, b) => a + (b - mu) * (b - mu), 0) / xs.length;
+  return Math.sqrt(v) || 1;
+}
+
+// Ordinary least squares for y ~ a + b*x. Returns null on degenerate input.
+function ols(xs: number[], ys: number[]): { a: number; b: number } | null {
+  const n = xs.length;
+  if (n < 3) return null;
+  const mx = mean(xs);
+  const my = mean(ys);
+  let sxx = 0;
+  let sxy = 0;
+  for (let i = 0; i < n; i++) {
+    sxx += (xs[i] - mx) * (xs[i] - mx);
+    sxy += (xs[i] - mx) * (ys[i] - my);
+  }
+  if (sxx === 0) return null;
+  const b = sxy / sxx;
+  return { a: my - b * mx, b };
+}
+
+function rSquared(xs: number[], ys: number[], a: number, b: number): number {
+  const my = mean(ys);
+  let ssTot = 0;
+  let ssRes = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const pred = a + b * xs[i];
+    ssTot += (ys[i] - my) * (ys[i] - my);
+    ssRes += (ys[i] - pred) * (ys[i] - pred);
+  }
+  return ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+}
+
+function rmseOf(xs: number[], ys: number[], a: number, b: number): number {
+  let s = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const d = ys[i] - (a + b * xs[i]);
+    s += d * d;
+  }
+  return Math.sqrt(s / xs.length);
+}
+
+// The traded comps: protocols whose token already has a market cap.
+export function tradedComps(protocols: Protocol[]): Protocol[] {
+  return protocols.filter((p) => p.mcap_usd != null && p.mcap_usd > 0 && p.tvl_usd > 0);
+}
+
+// Fit the log-log size curve on the traded comps.
+export function fitSizeCurve(comps: Protocol[]): CurveFit {
+  const xs = comps.map((p) => log10(p.tvl_usd));
+  const ys = comps.map((p) => log10(p.mcap_usd as number));
+  const fit = ols(xs, ys);
+  if (fit === null) throw new Error("size curve: degenerate comps");
+  const multiples = comps.map((p) => (p.mcap_usd as number) / p.tvl_usd);
+  const flatMultiple = median(multiples);
+  const flatLog = Math.log(flatMultiple) / Math.LN10;
+  // Flat baseline in log space: log10(mcap) = log10(multiple) + log10(tvl).
+  let flatSs = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const d = ys[i] - (flatLog + xs[i]);
+    flatSs += d * d;
+  }
+  const flatRmse = Math.sqrt(flatSs / xs.length);
+  const rmse = rmseOf(xs, ys, fit.a, fit.b);
+  const r2 = rSquared(xs, ys, fit.a, fit.b);
+  let residSs = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const d = ys[i] - (fit.a + fit.b * xs[i]);
+    residSs += d * d;
+  }
+  const residSd = Math.sqrt(residSs / Math.max(1, xs.length - 2));
+  return {
+    n: comps.length,
+    a: fit.a,
+    b: fit.b,
+    r2,
+    rmse,
+    residSd,
+    flatMultiple,
+    flatRmse,
+  };
+}
+
+// Leave-one-out error of the curve vs the flat multiple.
+export function looCurve(comps: Protocol[]): LooResult {
+  const xs = comps.map((p) => log10(p.tvl_usd));
+  const ys = comps.map((p) => log10(p.mcap_usd as number));
+  const multiples = comps.map((p) => (p.mcap_usd as number) / p.tvl_usd);
+  const flatMultiple = median(multiples);
+  const flatLog = Math.log(flatMultiple) / Math.LN10;
+  let ssCurve = 0;
+  let ssFlat = 0;
+  for (let i = 0; i < comps.length; i++) {
+    const xsLoo = xs.filter((_, j) => j !== i);
+    const ysLoo = ys.filter((_, j) => j !== i);
+    const fit = ols(xsLoo, ysLoo);
+    if (fit === null) continue;
+    const dCurve = ys[i] - (fit.a + fit.b * xs[i]);
+    const dFlat = ys[i] - (flatLog + xs[i]);
+    ssCurve += dCurve * dCurve;
+    ssFlat += dFlat * dFlat;
+  }
+  const rmse = Math.sqrt(ssCurve / comps.length);
+  const flatRmse = Math.sqrt(ssFlat / comps.length);
+  return { rmse, flatRmse, ratio: flatRmse / rmse };
+}
+
+// Time-split holdout: fit on the older-listed half of comps, test on the newer.
+export function timeSplitHoldout(comps: Protocol[]): HoldoutResult {
+  const dated = comps.filter((p) => p.listed_at != null);
+  const dates = dated.map((p) => p.listed_at as string).sort();
+  const cutoff = dates[Math.floor(dates.length / 2)];
+  const fitSet = dated.filter((p) => (p.listed_at as string) <= cutoff);
+  const testSet = dated.filter((p) => (p.listed_at as string) > cutoff);
+  const xsFit = fitSet.map((p) => log10(p.tvl_usd));
+  const ysFit = fitSet.map((p) => log10(p.mcap_usd as number));
+  const fit = ols(xsFit, ysFit);
+  if (fit === null) throw new Error("time split: degenerate fit set");
+  const xsTest = testSet.map((p) => log10(p.tvl_usd));
+  const ysTest = testSet.map((p) => log10(p.mcap_usd as number));
+  return {
+    cutoff,
+    nFit: fitSet.length,
+    nTest: testSet.length,
+    a: fit.a,
+    b: fit.b,
+    r2: rSquared(xsTest, ysTest, fit.a, fit.b),
+    rmse: rmseOf(xsTest, ysTest, fit.a, fit.b),
+  };
+}
+
+// Bootstrap the curve: resample comps with replacement, refit, take the
+// 90% interval (p5-p95) of each coefficient.
+export function bootstrapCurve(comps: Protocol[], seed: number, b: number): BootstrapResult {
+  const rng = mulberry32(seed);
+  const xs = comps.map((p) => log10(p.tvl_usd));
+  const ys = comps.map((p) => log10(p.mcap_usd as number));
+  const n = comps.length;
+  const pairs: { a: number; b: number }[] = [];
+  for (let k = 0; k < b; k++) {
+    const rx: number[] = [];
+    const ry: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const j = Math.floor(rng() * n);
+      rx.push(xs[j]);
+      ry.push(ys[j]);
+    }
+    const fit = ols(rx, ry);
+    if (fit !== null) pairs.push({ a: fit.a, b: fit.b });
+  }
+  const as = pairs.map((p) => p.a).sort((x, y) => x - y);
+  const bs = pairs.map((p) => p.b).sort((x, y) => x - y);
+  const q = (arr: number[], p: number) => arr[Math.min(arr.length - 1, Math.floor(p * arr.length))];
+  return {
+    b: pairs.length,
+    aLo: q(as, 0.05),
+    aHi: q(as, 0.95),
+    bLo: q(bs, 0.05),
+    bHi: q(bs, 0.95),
+    pairs,
+  };
+}
+
+// ---- Token odds: logistic regression for P(records a token) -------------
+//
+// Features: how long the protocol has run without a token (years since
+// listed_at), log10(TVL), and the 7-day TVL change in percent. Training
+// label: 1 when the protocol records a token (gecko_id or symbol set),
+// 0 otherwise. Features are standardised for the gradient descent, then
+// the coefficients are converted back to the raw scale so the dashboard
+// can quote them per year / per log unit / per percentage point.
+
+function sigmoid(z: number): number {
+  if (z >= 0) return 1 / (1 + Math.exp(-z));
+  const e = Math.exp(z);
+  return e / (1 + e);
+}
+
+function ageYears(listedAt: string | null, asOf: string, fallback: number): number {
+  if (listedAt == null) return fallback;
+  const ms = Date.parse(asOf + "T00:00:00Z") - Date.parse(listedAt + "T00:00:00Z");
+  return Math.max(0, ms / (365.25 * 86400 * 1000));
+}
+
+function recordsToken(p: Protocol): boolean {
+  return p.gecko_id != null || p.symbol != null;
+}
+
+export function fitTokenOdds(protocols: Protocol[], asOf: string): OddsModel {
+  const agesKnown = protocols
+    .filter((p) => p.listed_at != null)
+    .map((p) => ageYears(p.listed_at, asOf, 0));
+  const medianAge = median(agesKnown);
+  const feats = protocols.map((p) => {
+    const age = ageYears(p.listed_at, asOf, medianAge);
+    const logTvl = Math.log(p.tvl_usd) / Math.LN10;
+    const chg =
+      p.change_7d == null ? 0 : Math.max(-100, Math.min(500, p.change_7d));
+    return { age, logTvl, chg, y: recordsToken(p) ? 1 : 0 };
+  });
+  const meanAge = mean(feats.map((f) => f.age));
+  const meanLogTvl = mean(feats.map((f) => f.logTvl));
+  const meanChange = mean(feats.map((f) => f.chg));
+  const sdAge = sd(feats.map((f) => f.age), meanAge);
+  const sdLogTvl = sd(feats.map((f) => f.logTvl), meanLogTvl);
+  const sdChange = sd(feats.map((f) => f.chg), meanChange);
+  const z = feats.map((f) => [
+    (f.age - meanAge) / sdAge,
+    (f.logTvl - meanLogTvl) / sdLogTvl,
+    (f.chg - meanChange) / sdChange,
+  ]);
+  // Plain gradient descent on the standardised features. Deterministic:
+  // zero start, fixed step, fixed iteration count.
+  let w0 = 0;
+  let w1 = 0;
+  let w2 = 0;
+  let w3 = 0;
+  const lr = 0.1;
+  const iters = 3000;
+  const n = feats.length;
+  for (let it = 0; it < iters; it++) {
+    let g0 = 0;
+    let g1 = 0;
+    let g2 = 0;
+    let g3 = 0;
+    for (let i = 0; i < n; i++) {
+      const lin = w0 + w1 * z[i][0] + w2 * z[i][1] + w3 * z[i][2];
+      const d = sigmoid(lin) - feats[i].y;
+      g0 += d;
+      g1 += d * z[i][0];
+      g2 += d * z[i][1];
+      g3 += d * z[i][2];
+    }
+    w0 -= (lr * g0) / n;
+    w1 -= (lr * g1) / n;
+    w2 -= (lr * g2) / n;
+    w3 -= (lr * g3) / n;
+  }
+  // Convert back to the raw scale: logit = c0 + cAge*age + cLog*logTvl + cChg*chg.
+  const coefAge = w1 / sdAge;
+  const coefLogTvl = w2 / sdLogTvl;
+  const coefChange = w3 / sdChange;
+  const intercept =
+    w0 - (w1 * meanAge) / sdAge - (w2 * meanLogTvl) / sdLogTvl - (w3 * meanChange) / sdChange;
+  // AUC by the Mann-Whitney rank sum on the fitted probabilities.
+  const scored = feats.map((f) => {
+    const lin =
+      intercept + coefAge * f.age + coefLogTvl * f.logTvl + coefChange * f.chg;
+    return { p: sigmoid(lin), y: f.y };
+  });
+  const pos = scored.filter((s) => s.y === 1);
+  const neg = scored.filter((s) => s.y === 0);
+  let wins = 0;
+  let ties = 0;
+  for (const a of pos) {
+    for (const b of neg) {
+      if (a.p > b.p) wins++;
+      else if (a.p === b.p) ties++;
+    }
+  }
+  const auc = (wins + 0.5 * ties) / (pos.length * neg.length);
+  return {
+    n,
+    nPositive: pos.length,
+    intercept,
+    coefAge,
+    coefLogTvl,
+    coefChange,
+    orAge: Math.exp(coefAge),
+    orLogTvl: Math.exp(coefLogTvl),
+    orChange: Math.exp(coefChange),
+    auc,
+    medianAge,
+    meanAge,
+    meanLogTvl,
+    meanChange,
+    sdAge,
+    sdLogTvl,
+    sdChange,
+  };
+}
+
+export function tokenOdds(p: Protocol, model: OddsModel, asOf: string): number {
+  const age = ageYears(p.listed_at, asOf, model.medianAge);
+  const logTvl = Math.log(p.tvl_usd) / Math.LN10;
+  const chg = p.change_7d == null ? 0 : Math.max(-100, Math.min(500, p.change_7d));
+  const lin =
+    model.intercept + model.coefAge * age + model.coefLogTvl * logTvl + model.coefChange * chg;
+  return sigmoid(lin);
+}
+
+export function curveValue(tvlUsd: number, fit: CurveFit): number {
+  return Math.pow(10, fit.a + fit.b * (Math.log(tvlUsd) / Math.LN10));
+}
+
+export function impliedValue(
+  p: Protocol,
+  fit: CurveFit,
+  model: OddsModel,
+  asOf: string,
+): { curve: number; odds: number; implied: number } {
+  const curve = curveValue(p.tvl_usd, fit);
+  const odds = tokenOdds(p, model, asOf);
+  return { curve, odds, implied: curve * odds };
+}
+
+// ---- Board selection -----------------------------------------------------
+//
+// A protocol is board-eligible when it records no token and is not a
+// wrapped, staked or bridged product of a token that already trades, by
+// every check the snapshot itself can answer. (The house also checks
+// parentProtocol, a field the snapshot does not carry; the Methodology tab
+// says so.) The board is the whole watchlist plus the largest eligible
+// protocols below it, 198 rows in all.
+
+export const FORBIDDEN_CATEGORIES = new Set([
+  "Bridge",
+  "Canonical Bridge",
+  "Liquid Staking",
+  "Liquid Restaking",
+  "Restaked BTC",
+  "CEX",
+]);
+export const EXCHANGE_PREFIXES = [
+  "Binance",
+  "Coinbase",
+  "Bybit",
+  "Kraken",
+  "Bitget",
+  "OKX",
+  "Bitfinex",
+  "Gemini",
+];
+export const VERSION_TAIL = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
+export const WRAPPED_WORD = /\b(wrapped|staked|staking)\b/i;
+
+export function recordsNoToken(p: Protocol): boolean {
+  return p.gecko_id == null && p.symbol == null;
+}
+
+export function boardEligible(p: Protocol): boolean {
+  if (!recordsNoToken(p)) return false;
+  if (p.category != null && FORBIDDEN_CATEGORIES.has(p.category)) return false;
+  if (VERSION_TAIL.test(p.name)) return false;
+  if (WRAPPED_WORD.test(p.name)) return false;
+  if (EXCHANGE_PREFIXES.some((x) => p.name.startsWith(x))) return false;
+  return true;
 }
 
 export interface BoardRow {
@@ -81,656 +481,290 @@ export interface BoardRow {
   tvl_usd: number;
   change_7d: number | null;
   listed_at: string | null;
-  age_days: number | null;
-  scope: "watchlist" | "early";
+  age_years: number;
   rank: number;
-  curve_value_usd: number;
-  token_odds: number;
   implied_value_usd: number;
-  bootstrap_lo_usd: number;
-  bootstrap_hi_usd: number;
-  comparables: Comparable[];
+  curve_value_usd: number;
+  odds: number;
+  band_lo_usd: number;
+  band_hi_usd: number;
+  scope: "watchlist" | "early";
   farm_steps: string[];
-  farm_capital_usd: number;
-  farm_gas_usd: number;
-  farm_tx_count: number;
-  farm_hold_days: number;
-  farm_net_usd: number;
+  nearest: { slug: string; name: string; tvl_usd: number; mcap_usd: number; multiple: number }[];
 }
 
 export interface Census {
   total: number;
   traded: number;
   ranked: number;
-  excluded: number;
-  excludedByReason: Record<string, number>;
-  exchangePrefixNamesTotal: number;
-  rankedAtOrAboveFloor: number;
-  watchlist: number;
-  early: number;
+  tokenNoMcap: number;
+  forbiddenCategory: number;
+  versionedName: number;
+  wrappedWord: number;
+  exchangePrefix: number;
+  eligibleNotSelected: number;
+  examples: Record<string, string[]>;
 }
 
-export interface CategoryMultiple {
-  category: string;
-  n: number;
-  medianMultiple: number;
-}
-
-export interface BoardBuild {
-  asOf: string;
-  floorUsd: number;
-  fit: SizeCurveFit;
-  loo: LooResult;
-  timeSplit: TimeSplitResult;
-  odds: TokenOddsFit;
-  census: Census;
-  categories: CategoryMultiple[];
-  rows: BoardRow[];
-  traded: { slug: string; name: string; category: string | null; tvl_usd: number; mcap_usd: number | null; multiple: number | null }[];
-  totalImpliedUsd: number;
-}
-
-// ---------------------------------------------------------------------------
-// Exclusion rules, re-derived from the snapshot fields (see input README).
-// Priority order is fixed so every excluded protocol has exactly one reason.
-// ---------------------------------------------------------------------------
-
-const BANNED_CATEGORIES = new Set([
-  "Bridge",
-  "Canonical Bridge",
-  "Liquid Staking",
-  "Liquid Restaking",
-  "Restaked BTC",
-  "CEX",
-]);
-
-const EXCHANGE_PREFIXES = [
-  "Binance",
-  "Coinbase",
-  "Bybit",
-  "Kraken",
-  "Bitget",
-  "OKX",
-  "Bitfinex",
-  "Gemini",
-];
-
-const VERSION_RE = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
-const WRAPPED_RE = /\b(wrapped|staked|staking)\b/i;
-
-export function exclusionReason(p: Protocol): string | null {
-  if (p.category !== null && BANNED_CATEGORIES.has(p.category)) return "banned_category";
-  if (VERSION_RE.test(p.name)) return "versioned_name";
-  if (WRAPPED_RE.test(p.name)) return "wrapped_staked";
-  for (const prefix of EXCHANGE_PREFIXES) {
-    if (p.name.startsWith(prefix)) return "exchange_prefix";
-  }
-  return null;
-}
-
-export function recordsToken(p: Protocol): boolean {
-  return p.gecko_id !== null || p.symbol !== null || p.mcap_usd !== null;
-}
-
-export function isStrictPreToken(p: Protocol): boolean {
-  return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
-}
-
-// ---------------------------------------------------------------------------
-// Size curve: OLS on log10(mcap) = a + b * log10(tvl) over traded comps.
-// ---------------------------------------------------------------------------
-
-function ols(xs: number[], ys: number[]): { a: number; b: number } {
-  const n = xs.length;
-  const mx = xs.reduce((s, v) => s + v, 0) / n;
-  const my = ys.reduce((s, v) => s + v, 0) / n;
-  let sxy = 0;
-  let sxx = 0;
-  for (let i = 0; i < n; i++) {
-    sxy += (xs[i] - mx) * (ys[i] - my);
-    sxx += (xs[i] - mx) * (xs[i] - mx);
-  }
-  const b = sxy / sxx;
-  return { a: my - b * mx, b };
-}
-
-function fitSizeCurve(comps: Protocol[]): SizeCurveFit {
-  const xs = comps.map((p) => Math.log10(p.tvl_usd));
-  const ys = comps.map((p) => Math.log10(p.mcap_usd as number));
-  const n = xs.length;
-  const { a, b } = ols(xs, ys);
-  const my = ys.reduce((s, v) => s + v, 0) / n;
-  let ssRes = 0;
-  let ssTot = 0;
-  for (let i = 0; i < n; i++) {
-    const r = ys[i] - (a + b * xs[i]);
-    ssRes += r * r;
-    ssTot += (ys[i] - my) * (ys[i] - my);
-  }
-  const ratios = comps
-    .map((p) => (p.mcap_usd as number) / p.tvl_usd)
-    .sort((u, v) => u - v);
-  const flatMedianMultiple =
-    n % 2 === 1
-      ? ratios[(n - 1) / 2]
-      : (ratios[n / 2 - 1] + ratios[n / 2]) / 2;
-  return {
-    n,
-    a,
-    b,
-    r2: 1 - ssRes / ssTot,
-    rmse: Math.sqrt(ssRes / n),
-    residualSd: Math.sqrt(ssRes / (n - 2)),
-    flatMedianMultiple,
-  };
-}
-
-function looValidation(comps: Protocol[], flatMedian: number): LooResult {
-  const xs = comps.map((p) => Math.log10(p.tvl_usd));
-  const ys = comps.map((p) => Math.log10(p.mcap_usd as number));
-  const n = xs.length;
-  let looSe = 0;
-  let flatSe = 0;
-  for (let i = 0; i < n; i++) {
-    const xs2: number[] = [];
-    const ys2: number[] = [];
-    for (let j = 0; j < n; j++) {
-      if (j !== i) {
-        xs2.push(xs[j]);
-        ys2.push(ys[j]);
-      }
-    }
-    const { a, b } = ols(xs2, ys2);
-    const e = ys[i] - (a + b * xs[i]);
-    looSe += e * e;
-    const fe = ys[i] - Math.log10(flatMedian * Math.pow(10, xs[i]));
-    flatSe += fe * fe;
-  }
-  const rmse = Math.sqrt(looSe / n);
-  const flatRmse = Math.sqrt(flatSe / n);
-  return { rmse, flatRmse, oosMultiple: flatRmse / rmse };
-}
-
-function timeSplitValidation(comps: Protocol[]): TimeSplitResult {
-  const dated = comps
-    .filter((p) => p.listed_at !== null)
-    .slice()
-    .sort((u, v) => (u.listed_at as string) < (v.listed_at as string) ? -1 : 1);
-  const medianListedAt = dated[Math.floor(dated.length / 2)].listed_at as string;
-  const train = dated.filter((p) => (p.listed_at as string) <= medianListedAt);
-  const test = dated.filter((p) => (p.listed_at as string) > medianListedAt);
-  const { a, b } = ols(
-    train.map((p) => Math.log10(p.tvl_usd)),
-    train.map((p) => Math.log10(p.mcap_usd as number)),
-  );
-  const ys = test.map((p) => Math.log10(p.mcap_usd as number));
-  const my = ys.reduce((s, v) => s + v, 0) / ys.length;
-  let se = 0;
-  let st = 0;
-  for (let i = 0; i < test.length; i++) {
-    const pred = a + b * Math.log10(test[i].tvl_usd);
-    se += (ys[i] - pred) * (ys[i] - pred);
-    st += (ys[i] - my) * (ys[i] - my);
-  }
-  return {
-    medianListedAt,
-    trainN: train.length,
-    testN: test.length,
-    trainA: a,
-    trainB: b,
-    holdoutR2: 1 - se / st,
-    holdoutRmse: Math.sqrt(se / test.length),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Token-odds model: logistic regression on all 758 protocols.
-// Features: [age_days since listed_at, log10(tvl_usd), change_7d clamped].
-// Label y = 1 when the snapshot records a token, else 0.
-// Deterministic full-batch gradient descent, fixed iterations, no random.
-// ---------------------------------------------------------------------------
-
-const AS_OF = "2026-11-14";
-const AS_OF_MS = Date.parse(AS_OF + "T00:00:00Z");
-
-function ageDays(p: Protocol, medianAge: number): number {
-  if (p.listed_at === null) return medianAge;
-  return Math.round((AS_OF_MS - Date.parse(p.listed_at + "T00:00:00Z")) / 86400000);
-}
-
-function clampChange(p: Protocol): number {
-  if (p.change_7d === null) return 0;
-  if (p.change_7d > 50) return 50;
-  if (p.change_7d < -50) return -50;
-  return p.change_7d;
-}
-
-function oddsFeatures(p: Protocol, medianAge: number): number[] {
-  return [ageDays(p, medianAge), Math.log10(p.tvl_usd), clampChange(p)];
-}
-
-function sigmoid(z: number): number {
-  if (z < -30) return 0;
-  if (z > 30) return 1;
-  return 1 / (1 + Math.exp(-z));
-}
-
-function fitTokenOdds(all: Protocol[]): TokenOddsFit {
-  const ages = all
-    .filter((p) => p.listed_at !== null)
-    .map((p) => ageDays(p, 0))
-    .sort((u, v) => u - v);
-  const medianAge = ages[Math.floor(ages.length / 2)];
-  const raw = all.map((p) => oddsFeatures(p, medianAge));
-  const labels = all.map((p) => (recordsToken(p) ? 1 : 0));
-  const n = all.length;
-  const means = [0, 1, 2].map(
-    (j) => raw.reduce((s, r) => s + r[j], 0) / n,
-  );
-  const sds = [0, 1, 2].map((j) =>
-    Math.sqrt(raw.reduce((s, r) => s + (r[j] - means[j]) * (r[j] - means[j]), 0) / n),
-  );
-  const z = raw.map((r) => [0, 1, 2].map((j) => (r[j] - means[j]) / sds[j]));
-  const weights = [0, 0, 0];
-  let intercept = 0;
-  const learningRate = 0.5;
-  const iterations = 2000;
-  for (let iter = 0; iter < iterations; iter++) {
-    const gw = [0, 0, 0];
-    let gb = 0;
-    for (let i = 0; i < n; i++) {
-      const lin =
-        intercept + weights[0] * z[i][0] + weights[1] * z[i][1] + weights[2] * z[i][2];
-      const err = sigmoid(lin) - labels[i];
-      gw[0] += err * z[i][0];
-      gw[1] += err * z[i][1];
-      gw[2] += err * z[i][2];
-      gb += err;
-    }
-    for (let j = 0; j < 3; j++) weights[j] -= (learningRate * gw[j]) / n;
-    intercept -= (learningRate * gb) / n;
-  }
-  const oddsRatios = weights.map((w) => Math.exp(w));
-  // AUC (pairwise, ties count 1/2).
-  const score = (i: number): number =>
-    sigmoid(
-      intercept +
-        weights[0] * z[i][0] +
-        weights[1] * z[i][1] +
-        weights[2] * z[i][2],
-    );
-  let wins = 0;
-  let pairs = 0;
-  for (let i = 0; i < n; i++) {
-    if (labels[i] !== 1) continue;
-    for (let j = 0; j < n; j++) {
-      if (labels[j] !== 0) continue;
-      pairs++;
-      const si = score(i);
-      const sj = score(j);
-      if (si > sj) wins += 1;
-      else if (si === sj) wins += 0.5;
-    }
-  }
-  return {
-    weights,
-    intercept,
-    oddsRatios,
-    featureMeans: means,
-    featureSds: sds,
-    auc: wins / pairs,
-    iterations,
-    learningRate,
-  };
-}
-
-function tokenOdds(
-  p: Protocol,
-  fit: TokenOddsFit,
-  medianAge: number,
-): number {
-  const f = oddsFeatures(p, medianAge);
-  let lin = fit.intercept;
-  for (let j = 0; j < 3; j++) {
-    lin += fit.weights[j] * ((f[j] - fit.featureMeans[j]) / fit.featureSds[j]);
-  }
-  return sigmoid(lin);
-}
-
-// ---------------------------------------------------------------------------
-// Bootstrap band: B resamples of the traded comps, deterministic mulberry32.
-// Only the size curve is refit; token odds are held fixed.
-// ---------------------------------------------------------------------------
-
-function mulberry32(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s = (s + 0x6d2b79f5) >>> 0;
-    let t = s;
-    t = Math.imul(t ^ (t >>> 15), t | 1) >>> 0;
-    t = (t ^ ((t + Math.imul(t ^ (t >>> 7), t | 61)) >>> 0)) >>> 0;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function bootstrapBands(
-  comps: Protocol[],
-  rows: { slug: string; tvl: number; odds: number }[],
-  seed: number,
-  draws: number,
-): Map<string, [number, number]> {
-  const rng = mulberry32(seed);
-  const n = comps.length;
-  const xs = comps.map((p) => Math.log10(p.tvl_usd));
-  const ys = comps.map((p) => Math.log10(p.mcap_usd as number));
-  const samples = new Map<string, number[]>();
-  for (const r of rows) samples.set(r.slug, []);
-  for (let k = 0; k < draws; k++) {
-    const idx: number[] = [];
-    for (let i = 0; i < n; i++) idx.push(Math.floor(rng() * n));
-    const { a, b } = ols(
-      idx.map((i) => xs[i]),
-      idx.map((i) => ys[i]),
-    );
-    for (const r of rows) {
-      const v = Math.pow(10, a + b * Math.log10(r.tvl)) * r.odds;
-      samples.get(r.slug)!.push(v);
-    }
-  }
-  const out = new Map<string, [number, number]>();
-  for (const [slug, vals] of samples) {
-    vals.sort((u, v) => u - v);
-    const lo = vals[Math.floor(0.05 * draws)];
-    const hi = vals[Math.floor(0.95 * draws) - 1];
-    out.set(slug, [Math.round(lo), Math.round(hi)]);
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Farm plans: 6 concrete steps, costed in dollars, netted to the dollar.
-// Gas prices are ASSUMPTIONS (labelled as such), not snapshot data.
-// ---------------------------------------------------------------------------
-
-const GAS_PER_TX: Record<string, number> = {
-  Ethereum: 8,
+// Gas assumptions, per transaction, by the protocol's main chain. These are
+// assumptions (labelled as such on the dashboard), not measured fees:
+// a flat 16-transaction plan priced at the chain's typical simple-transfer
+// cost in November 2026.
+export const GAS_PER_TX: Record<string, number> = {
+  Ethereum: 6.0,
   Solana: 0.05,
+  Base: 0.1,
+  Arbitrum: 0.3,
+  Optimism: 0.2,
+  Polygon: 0.05,
+  "BNB Chain": 0.2,
+  Binance: 0.2,
+  Avalanche: 0.3,
   Sui: 0.05,
   Aptos: 0.05,
-  NEAR: 0.05,
-  Base: 0.5,
-  Arbitrum: 0.5,
-  Optimism: 0.5,
-  Polygon: 0.5,
-  "zkSync Era": 0.5,
-  Blast: 0.5,
-  Linea: 0.5,
-  Scroll: 0.5,
-  Mode: 0.5,
-  Mantle: 0.5,
-  Gnosis: 0.5,
-  Celo: 0.5,
-  Tron: 0.5,
-  BSC: 0.3,
-  "BNB Chain": 0.3,
-  Avalanche: 0.4,
-  Fantom: 0.3,
+  Sonic: 0.05,
+  Sei: 0.05,
+  "zkSync Era": 0.2,
 };
+export const FARM_TX_COUNT = 16;
+export const HOLD_DAYS = 90;
 
-export function gasPerTx(chain: string): number {
-  return GAS_PER_TX[chain] ?? 1;
-}
-
-export const FARM_HOLD_DAYS = 90;
-const FARM_TX_PER_STEP = [2, 1, 12, 0, 0, 1];
-
-const PRODUCT_BY_CATEGORY: Record<string, string> = {
-  Lending: "lending market",
-  Dexs: "liquidity pool",
-  Yield: "yield vault",
-  "Yield Aggregator": "vault",
-  Derivatives: "perpetuals market",
-  CDP: "vault",
-  Restaking: "restaking pool",
-  "Liquid Staking": "staking pool",
-  "Cross Chain": "bridge pool",
-  RWA: "vault",
-};
-
-function productFor(category: string | null): string {
-  if (category !== null && PRODUCT_BY_CATEGORY[category]) {
-    return PRODUCT_BY_CATEGORY[category];
-  }
-  return "core product";
-}
-
-export function capitalFor(tvl: number): number {
-  if (tvl >= 1_000_000_000) return 5000;
-  if (tvl >= 500_000_000) return 2500;
-  if (tvl >= 200_000_000) return 1000;
-  if (tvl >= 100_000_000) return 500;
+export function capitalTier(tvlUsd: number): number {
+  if (tvlUsd >= 1_000_000_000) return 5000;
+  if (tvlUsd >= 100_000_000) return 1000;
+  if (tvlUsd >= 10_000_000) return 500;
   return 250;
 }
 
-function money(n: number): string {
+function usd(n: number): string {
   return "$" + Math.round(n).toLocaleString("en-US");
 }
 
-export interface FarmPlan {
-  steps: string[];
-  capitalUsd: number;
-  gasUsd: number;
-  txCount: number;
-  holdDays: number;
-  netUsd: number;
-}
+const CATEGORY_ACTION: Record<string, string> = {
+  Dexs: "swap through its pools",
+  Lending: "lend assets and open a small borrow",
+  Yield: "deposit into its vaults",
+  Bridge: "bridge assets through it",
+  "Liquid Staking": "stake through it",
+  Derivatives: "open a small hedged position",
+  "CDP": "open a collateralised position",
+  "Algo-Stables": "mint and hold its stable asset",
+  Farm: "stake in its farms",
+  Staking: "stake through it",
+  "Restaking": "restake through it",
+  "Prediction Market": "place small prediction positions",
+  "Options": "open a small options position",
+  "Perpetuals": "open a small perpetual position",
+};
 
-export function farmPlan(
-  p: Protocol,
-  impliedValueUsd: number,
-): FarmPlan {
-  const chain = p.chains.length > 0 ? p.chains[0] : "Ethereum";
-  const gas = gasPerTx(chain);
-  const capital = capitalFor(p.tvl_usd);
-  const txCount = FARM_TX_PER_STEP.reduce((s, v) => s + v, 0);
-  const gasUsd = Math.round(txCount * gas * 100) / 100;
-  const netUsd = Math.round(impliedValueUsd - gasUsd);
-  const product = productFor(p.category);
-  const weeklyTx = FARM_TX_PER_STEP[2];
+export function farmPlan(row: BoardRow): string[] {
+  const chain = row.chains.length > 0 ? row.chains[0] : "Ethereum";
+  const gasPerTx = GAS_PER_TX[chain] ?? 1.0;
+  const gasTotal = FARM_TX_COUNT * gasPerTx;
+  const capital = capitalTier(row.tvl_usd);
+  const action = CATEGORY_ACTION[row.category ?? ""] ?? "use its core product";
+  const net = Math.max(0, row.implied_value_usd - gasTotal);
   const steps = [
-    `Fund a fresh wallet on ${chain} with ${money(capital)} in stablecoins plus about ${money(gasUsd)} for fees; bridging in takes roughly 15 minutes and the first transaction costs about ${money(gas)} in gas (assumed price, not snapshot data).`,
-    `Deposit the full ${money(capital)} into ${p.name}'s ${product} on ${chain}; the deposit is one transaction costing about ${money(gas)} in gas (assumed) and confirms in about 2 minutes.`,
-    `Keep the deposit in place for ${FARM_HOLD_DAYS} days and make one small transaction a week, about ${weeklyTx} transactions at roughly ${money(gas)} each, so activity is spread out instead of a single burst.`,
-    `Once a week open ${p.name}'s app, check the position and any points or eligibility screen, and save the transaction hashes plus a screenshot of the dashboard for your own records.`,
-    `If ${p.name} announces a token, snapshot, or points conversion, follow only the announcement on its official channels; ignore links sent by replies or direct messages and never move funds to a new address.`,
-    `After the announced snapshot date withdraw the ${money(capital)} principal plus any yield; total gas across this plan is about ${money(gasUsd)} over ${txCount} transactions, giving a model net value of about ${money(netUsd)} (protocol-scale expected value minus gas).`,
+    `Move ${usd(capital)} to ${chain}, the protocol's main chain, as working capital and keep it ready for ${HOLD_DAYS} days of activity.`,
+    `${capFirst(action)} with ${usd(Math.round(capital * 0.4))} on ${chain} in 3 to 5 transactions during the first week.`,
+    `Repeat the core action once a week for 12 weeks so the usage history is steady, not a single burst on one day.`,
+    `Keep a record of every transaction hash and check the dashboard's eligibility checklist once a month.`,
+    `Budget ${usd(gasTotal)} of gas for the whole plan (${FARM_TX_COUNT} transactions at about ${usd(gasPerTx)} each on ${chain}, an assumption, not a measured fee).`,
+    `Expected net: ${usd(row.implied_value_usd)} implied value minus ${usd(gasTotal)} gas is ${usd(net)}; if a token launches, claim within 7 days and exit half the position.`,
   ];
-  return { steps, capitalUsd: capital, gasUsd, txCount, holdDays: FARM_HOLD_DAYS, netUsd };
+  return steps;
 }
 
-// ---------------------------------------------------------------------------
-// Full build.
-// ---------------------------------------------------------------------------
-
-function medianOf(values: number[]): number {
-  const v = values.slice().sort((a, b) => a - b);
-  const n = v.length;
-  return n % 2 === 1 ? v[(n - 1) / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+function capFirst(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-export function buildBoard(snapshot: Snapshot): BoardBuild {
-  const all = snapshot.protocols;
-  const watchlist = new Set(snapshot.watchlist);
-
-  // Traded comps for the size curve: market cap and TVL both positive.
-  const comps = all.filter(
-    (p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0,
-  );
-  const fit = fitSizeCurve(comps);
-  const loo = looValidation(comps, fit.flatMedianMultiple);
-  const timeSplit = timeSplitValidation(comps);
-  const oddsFit = fitTokenOdds(all);
-
-  const ages = all
-    .filter((p) => p.listed_at !== null)
-    .map((p) => ageDays(p, 0))
-    .sort((a, b) => a - b);
-  const medianAge = ages[Math.floor(ages.length / 2)];
-
-  // Rankable: strict pre-token + exclusion rules. No TVL floor here:
-  // the watchlist floor is a floor, never a ceiling.
-  const ranked: Protocol[] = [];
-  const excludedByReason: Record<string, number> = {};
-  let tradedCount = 0;
-  for (const p of all) {
-    if (recordsToken(p)) {
-      tradedCount++;
-      continue;
-    }
-    const reason = exclusionReason(p);
-    if (reason !== null) {
-      excludedByReason[reason] = (excludedByReason[reason] ?? 0) + 1;
-    } else {
-      ranked.push(p);
-    }
-  }
-
-  // Nearest traded comparables by |log10 TVL| distance.
-  const comparablesFor = (p: Protocol): Comparable[] => {
-    const lt = Math.log10(p.tvl_usd);
-    return comps
-      .map((c) => ({
-        slug: c.slug,
-        name: c.name,
-        tvl_usd: c.tvl_usd,
-        mcap_usd: c.mcap_usd as number,
-        multiple: (c.mcap_usd as number) / c.tvl_usd,
-        dist: Math.abs(Math.log10(c.tvl_usd) - lt),
-      }))
-      .sort((u, v) => (u.dist === v.dist ? (u.slug < v.slug ? -1 : 1) : u.dist - v.dist))
-      .slice(0, 3)
-      .map(({ slug, name, tvl_usd, mcap_usd, multiple }) => ({
-        slug,
-        name,
-        tvl_usd,
-        mcap_usd,
-        multiple,
-      }));
-  };
-
-  const priced = ranked.map((p) => {
-    const curve = Math.pow(10, fit.a + fit.b * Math.log10(p.tvl_usd));
-    const odds = tokenOdds(p, oddsFit, medianAge);
-    return {
-      p,
-      curveValue: Math.round(curve),
-      odds,
-      implied: Math.round(curve * odds),
-    };
-  });
-  priced.sort((u, v) =>
-    v.implied !== u.implied
-      ? v.implied - u.implied
-      : u.p.slug < v.p.slug
-        ? -1
-        : 1,
-  );
-
-  const bands = bootstrapBands(
-    comps,
-    priced.map((r) => ({ slug: r.p.slug, tvl: r.p.tvl_usd, odds: r.odds })),
-    20261124,
-    200,
-  );
-
-  const rows: BoardRow[] = priced.map((r, i) => {
-    const plan = farmPlan(r.p, r.implied);
-    const [lo, hi] = bands.get(r.p.slug) as [number, number];
-    return {
-      slug: r.p.slug,
-      name: r.p.name,
-      category: r.p.category,
-      chains: r.p.chains,
-      tvl_usd: r.p.tvl_usd,
-      change_7d: r.p.change_7d,
-      listed_at: r.p.listed_at,
-      age_days: r.p.listed_at === null ? null : ageDays(r.p, medianAge),
-      scope: watchlist.has(r.p.slug) ? "watchlist" : "early",
-      rank: i + 1,
-      curve_value_usd: r.curveValue,
-      token_odds: Math.round(r.odds * 10000) / 10000,
-      implied_value_usd: r.implied,
-      bootstrap_lo_usd: lo,
-      bootstrap_hi_usd: hi,
-      comparables: comparablesFor(r.p),
-      farm_steps: plan.steps,
-      farm_capital_usd: plan.capitalUsd,
-      farm_gas_usd: plan.gasUsd,
-      farm_tx_count: plan.txCount,
-      farm_hold_days: plan.holdDays,
-      farm_net_usd: plan.netUsd,
-    };
-  });
-
-  // Category multiples among traded comps.
-  const byCat = new Map<string, number[]>();
-  for (const c of comps) {
-    const key = c.category ?? "(no category)";
-    if (!byCat.has(key)) byCat.set(key, []);
-    byCat.get(key)!.push((c.mcap_usd as number) / c.tvl_usd);
-  }
-  const categories: CategoryMultiple[] = [...byCat.entries()]
-    .map(([category, vals]) => ({
-      category,
-      n: vals.length,
-      medianMultiple: medianOf(vals),
+// Three traded comps nearest in size (log TVL distance) to the row.
+export function nearestComps(
+  row: BoardRow,
+  comps: Protocol[],
+): BoardRow["nearest"] {
+  const lt = Math.log(row.tvl_usd) / Math.LN10;
+  return comps
+    .map((c) => ({
+      slug: c.slug,
+      name: c.name,
+      tvl_usd: c.tvl_usd,
+      mcap_usd: c.mcap_usd as number,
+      multiple: (c.mcap_usd as number) / c.tvl_usd,
+      d: Math.abs(Math.log(c.tvl_usd) / Math.LN10 - lt),
     }))
-    .sort((u, v) =>
-      v.n !== u.n ? v.n - u.n : u.category < v.category ? -1 : 1,
-    );
+    .sort((a, b) => a.d - b.d || (a.slug < b.slug ? -1 : 1))
+    .slice(0, 3)
+    .map(({ slug, name, tvl_usd, mcap_usd, multiple }) => ({
+      slug,
+      name,
+      tvl_usd,
+      mcap_usd,
+      multiple,
+    }));
+}
 
-  // Live tokens: every protocol that records a token (416), by market
-  // cap descending; mcap is null for 272 of them, shown as "no mcap".
-  const traded = all
-    .filter((p) => recordsToken(p))
-    .map((p) => ({
+// Bootstrap band for one row's implied value: refit the curve on each
+// resample, price the row with each refit, take the 90% interval.
+export function rowBand(
+  pairs: { a: number; b: number }[],
+  tvlUsd: number,
+  odds: number,
+): { lo: number; hi: number } {
+  const lt = Math.log(tvlUsd) / Math.LN10;
+  const vals = pairs
+    .map(({ a, b }) => Math.pow(10, a + b * lt) * odds)
+    .sort((x, y) => x - y);
+  const q = (p: number) => vals[Math.min(vals.length - 1, Math.floor(p * vals.length))];
+  return { lo: q(0.05), hi: q(0.95) };
+}
+
+export interface BoardBuild {
+  rows: BoardRow[];
+  census: Census;
+  watchlistCovered: number;
+  watchlistTotal: number;
+}
+
+export function buildBoard(
+  snap: Snapshot,
+  fit: CurveFit,
+  oddsModel: OddsModel,
+  pairs: { a: number; b: number }[],
+): BoardBuild {
+  const bySlug = new Map(snap.protocols.map((p) => [p.slug, p]));
+  const comps = tradedComps(snap.protocols);
+  const picked: Protocol[] = [];
+  const pickedSlugs = new Set<string>();
+  for (const slug of snap.watchlist) {
+    const p = bySlug.get(slug);
+    if (p !== undefined && !pickedSlugs.has(slug)) {
+      picked.push(p);
+      pickedSlugs.add(slug);
+    }
+  }
+  const early = snap.protocols
+    .filter((p) => !pickedSlugs.has(p.slug) && boardEligible(p))
+    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : 1));
+  const TARGET_ROWS = 198;
+  for (const p of early) {
+    if (picked.length >= TARGET_ROWS) break;
+    picked.push(p);
+    pickedSlugs.add(p.slug);
+  }
+  const rows: BoardRow[] = picked.map((p) => {
+    const { curve, odds, implied } = impliedValue(p, fit, oddsModel, snap.as_of);
+    const band = rowBand(pairs, p.tvl_usd, odds);
+    const row: BoardRow = {
       slug: p.slug,
       name: p.name,
       category: p.category,
+      chains: p.chains,
       tvl_usd: p.tvl_usd,
-      mcap_usd: p.mcap_usd,
-      multiple:
-        p.mcap_usd === null ? null : p.mcap_usd / p.tvl_usd,
-    }))
-    .sort((u, v) => (v.mcap_usd ?? -1) - (u.mcap_usd ?? -1));
-
-  const exchangePrefixNamesTotal = all.filter((p) =>
-    EXCHANGE_PREFIXES.some((prefix) => p.name.startsWith(prefix)),
-  ).length;
-
-  const census: Census = {
-    total: all.length,
-    traded: tradedCount,
-    ranked: rows.length,
-    excluded: all.length - tradedCount - rows.length,
-    excludedByReason,
-    exchangePrefixNamesTotal,
-    rankedAtOrAboveFloor: rows.filter((r) => r.tvl_usd >= snapshot.floor_usd).length,
-    watchlist: rows.filter((r) => r.scope === "watchlist").length,
-    early: rows.filter((r) => r.scope === "early").length,
+      change_7d: p.change_7d,
+      listed_at: p.listed_at,
+      age_years: ageYears(p.listed_at, snap.as_of, oddsModel.medianAge),
+      rank: 0,
+      implied_value_usd: Math.max(1, Math.round(implied)),
+      curve_value_usd: Math.max(1, Math.round(curve)),
+      odds,
+      band_lo_usd: Math.max(1, Math.round(band.lo)),
+      band_hi_usd: Math.max(1, Math.round(band.hi)),
+      scope: snap.watchlist.includes(p.slug) ? "watchlist" : "early",
+      farm_steps: [],
+      nearest: nearestComps(
+        {
+          slug: p.slug,
+          name: p.name,
+          category: p.category,
+          chains: p.chains,
+          tvl_usd: p.tvl_usd,
+          change_7d: p.change_7d,
+          listed_at: p.listed_at,
+          age_years: 0,
+          rank: 0,
+          implied_value_usd: 0,
+          curve_value_usd: 0,
+          odds: 0,
+          band_lo_usd: 0,
+          band_hi_usd: 0,
+          scope: "watchlist",
+          farm_steps: [],
+          nearest: [],
+        },
+        comps,
+      ),
+    };
+    row.farm_steps = farmPlan(row);
+    return row;
+  });
+  rows.sort(
+    (a, b) =>
+      b.implied_value_usd - a.implied_value_usd ||
+      b.tvl_usd - a.tvl_usd ||
+      (a.slug < b.slug ? -1 : 1),
+  );
+  rows.forEach((r, i) => (r.rank = i + 1));
+  // Census: every protocol accounted for, first matching reason wins.
+  const examples: Record<string, string[]> = {
+    tokenNoMcap: [],
+    forbiddenCategory: [],
+    versionedName: [],
+    wrappedWord: [],
+    exchangePrefix: [],
+    eligibleNotSelected: [],
   };
-
+  const c: Census = {
+    total: snap.protocols.length,
+    traded: 0,
+    ranked: rows.length,
+    tokenNoMcap: 0,
+    forbiddenCategory: 0,
+    versionedName: 0,
+    wrappedWord: 0,
+    exchangePrefix: 0,
+    eligibleNotSelected: 0,
+    examples,
+  };
+  for (const p of snap.protocols) {
+    if (p.mcap_usd != null && p.mcap_usd > 0) {
+      c.traded++;
+      continue;
+    }
+    if (pickedSlugs.has(p.slug)) continue; // ranked
+    if (!recordsNoToken(p)) {
+      c.tokenNoMcap++;
+      if (examples.tokenNoMcap.length < 10) examples.tokenNoMcap.push(p.slug);
+      continue;
+    }
+    if (p.category != null && FORBIDDEN_CATEGORIES.has(p.category)) {
+      c.forbiddenCategory++;
+      if (examples.forbiddenCategory.length < 10) examples.forbiddenCategory.push(p.slug);
+      continue;
+    }
+    if (VERSION_TAIL.test(p.name)) {
+      c.versionedName++;
+      if (examples.versionedName.length < 10) examples.versionedName.push(p.slug);
+      continue;
+    }
+    if (WRAPPED_WORD.test(p.name)) {
+      c.wrappedWord++;
+      if (examples.wrappedWord.length < 10) examples.wrappedWord.push(p.slug);
+      continue;
+    }
+    if (EXCHANGE_PREFIXES.some((x) => p.name.startsWith(x))) {
+      c.exchangePrefix++;
+      if (examples.exchangePrefix.length < 10) examples.exchangePrefix.push(p.slug);
+      continue;
+    }
+    c.eligibleNotSelected++;
+    if (examples.eligibleNotSelected.length < 10) examples.eligibleNotSelected.push(p.slug);
+  }
   return {
-    asOf: snapshot.as_of,
-    floorUsd: snapshot.floor_usd,
-    fit,
-    loo,
-    timeSplit,
-    odds: oddsFit,
-    census,
-    categories,
     rows,
-    traded,
-    totalImpliedUsd: rows.reduce((s, r) => s + r.implied_value_usd, 0),
+    census: c,
+    watchlistCovered: snap.watchlist.filter((s) => pickedSlugs.has(s)).length,
+    watchlistTotal: snap.watchlist.length,
   };
 }
