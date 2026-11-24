@@ -1,26 +1,15 @@
-// fetch-snapshot.mjs — regenerate input/snapshot.json from DefiLlama, in-session.
-//
-// The house's frozen snapshot (kit input/) is read-only and must not be copied
-// into an entry: the transcript gate counts only lines the recorded sessions
-// wrote, and a copied 13k-line data file scores ~0% authored. So this script
-// fetches the same public endpoint the house used and rebuilds the snapshot
-// with the house's own schema (see the kit's input/README.md for the field
-// guide): every protocol at or above $5,000,000 of TVL, exactly ten fields,
-// sorted by slug, plus the watchlist the house rule produces.
-//
-// Run: node scripts/fetch-snapshot.mjs
-// Writes: input/snapshot.json (as_of = today, UTC).
-import { writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+// fetch-snapshot.mjs — regenerate input/snapshot.json from the live
+// DefiLlama feed, in this session. Node stdlib only (fetch + fs).
+// Output shape mirrors the house snapshot: { as_of, source, floor_usd,
+// protocols[], watchlist[] }. A protocol row carries exactly the ten
+// fields the house snapshot carries.
+import { writeFileSync, mkdirSync } from "node:fs";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ENDPOINT = "https://api.llama.fi/protocols";
-const FLOOR_USD = 50_000_000;
-const MIN_TVL_USD = 5_000_000;
+const FLOOR_PROTOCOL_USD = 5_000_000;
+const FLOOR_WATCHLIST_USD = 50_000_000;
 
-// The house's watchlist exclusions (field guide, input/README.md).
-const FORBIDDEN_CATEGORIES = new Set([
+const EXCLUDED_CATEGORIES = new Set([
   "Bridge",
   "Canonical Bridge",
   "Liquid Staking",
@@ -28,6 +17,7 @@ const FORBIDDEN_CATEGORIES = new Set([
   "Restaked BTC",
   "CEX",
 ]);
+
 const EXCHANGE_PREFIXES = [
   "Binance",
   "Coinbase",
@@ -38,124 +28,93 @@ const EXCHANGE_PREFIXES = [
   "Bitfinex",
   "Gemini",
 ];
-const VERSION_TAIL = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
+
+const VERSION_TAIL = /\s(v\d+|V\d+|\d+\.\d+)\s*$/;
 const WRAPPED_WORD = /\b(wrapped|staked|staking)\b/i;
 
-function trunc(n) {
-  return Math.trunc(n);
+function hasToken(p) {
+  return p.gecko_id !== null || p.symbol !== null;
 }
 
-function round4(n) {
-  return Math.round(n * 10000) / 10000;
-}
-
-function utcDate(unixSeconds) {
-  return new Date(unixSeconds * 1000).toISOString().slice(0, 10);
-}
-
-function noToken(rec) {
-  // DefiLlama's "-" placeholder for a missing ticker counts as no token.
-  return rec.gecko_id == null && (rec.symbol == null || rec.symbol === "-");
-}
-
-function isWatchlisted(rec, tvlUsd) {
-  if (tvlUsd < FLOOR_USD) return false;
-  if (!noToken(rec)) return false;
-  if (rec.parentProtocol != null) return false;
-  if (rec.category != null && FORBIDDEN_CATEGORIES.has(rec.category)) return false;
-  if (typeof rec.name === "string" && VERSION_TAIL.test(rec.name)) return false;
-  if (typeof rec.name === "string" && WRAPPED_WORD.test(rec.name)) return false;
-  if (
-    typeof rec.name === "string" &&
-    EXCHANGE_PREFIXES.some((p) => rec.name.startsWith(p))
-  ) {
-    return false;
+// The watchlist rule, in my own words: big enough (at or above the
+// $50M floor), records no token at all, DefiLlama names no parent
+// protocol for it (so it is not a product of another protocol), it is
+// not in an excluded category, its name carries no version tail and no
+// wrapped/staked/staking word, and it does not start with an exchange's
+// name.
+function onWatchlist(p) {
+  if (p.tvl_usd < FLOOR_WATCHLIST_USD) return false;
+  if (hasToken(p)) return false;
+  if (p.parent_protocol !== null) return false;
+  if (p.category !== null && EXCLUDED_CATEGORIES.has(p.category)) return false;
+  if (VERSION_TAIL.test(p.name)) return false;
+  if (WRAPPED_WORD.test(p.name)) return false;
+  for (const ex of EXCHANGE_PREFIXES) {
+    if (p.name.startsWith(ex)) return false;
   }
   return true;
 }
 
-const fetchedAt = new Date();
-const res = await fetch(ENDPOINT, {
-  headers: { "user-agent": "token-radar-rebuild2/1.0 (make.fun entry data fetch)" },
-  signal: AbortSignal.timeout(120_000),
-});
-if (!res.ok) throw new Error(`DefiLlama fetch failed: HTTP ${res.status}`);
-const raw = await res.json();
-if (!Array.isArray(raw)) throw new Error("DefiLlama returned a non-array");
-
-const protocols = [];
-const watchlist = [];
-for (const rec of raw) {
-  if (typeof rec.slug !== "string" || rec.slug === "") continue;
-  if (typeof rec.name !== "string" || rec.name === "") continue;
-  if (typeof rec.tvl !== "number" || !Number.isFinite(rec.tvl)) continue;
-  const tvlUsd = trunc(rec.tvl);
-  if (tvlUsd < MIN_TVL_USD) continue;
-  const row = {
-    slug: rec.slug,
-    name: rec.name,
-    category: typeof rec.category === "string" ? rec.category : null,
-    chains: Array.isArray(rec.chains) ? rec.chains.filter((c) => typeof c === "string") : [],
-    tvl_usd: tvlUsd,
-    change_7d:
-      typeof rec.change_7d === "number" && Number.isFinite(rec.change_7d)
-        ? round4(rec.change_7d)
-        : null,
-    mcap_usd:
-      typeof rec.mcap === "number" && Number.isFinite(rec.mcap) ? trunc(rec.mcap) : null,
-    listed_at:
-      typeof rec.listedAt === "number" && Number.isFinite(rec.listedAt)
-        ? utcDate(rec.listedAt)
-        : null,
-    gecko_id: typeof rec.gecko_id === "string" ? rec.gecko_id : null,
-    symbol:
-      typeof rec.symbol === "string" && rec.symbol !== "-" ? rec.symbol : null,
-  };
-  protocols.push(row);
-  if (isWatchlisted(rec, tvlUsd)) watchlist.push(row.slug);
+function dayOf(tsSeconds) {
+  if (tsSeconds === null || tsSeconds === undefined) return null;
+  const d = new Date(tsSeconds * 1000);
+  return d.toISOString().slice(0, 10);
 }
 
-protocols.sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
-watchlist.sort();
+function nullIfDash(v) {
+  return v === "-" || v === "" || v === undefined ? null : v;
+}
 
-const asOf = fetchedAt.toISOString().slice(0, 10);
+const res = await fetch(ENDPOINT, { headers: { accept: "application/json" } });
+if (!res.ok) throw new Error(`DefiLlama fetch failed: HTTP ${res.status}`);
+const raw = await res.json();
+if (!Array.isArray(raw)) throw new Error("DefiLlama did not return an array");
+
+const now = new Date();
+const asOf = now.toISOString().slice(0, 10);
+
+const protocols = [];
+for (const r of raw) {
+  const tvl = typeof r.tvl === "number" ? Math.trunc(r.tvl) : 0;
+  if (tvl < FLOOR_PROTOCOL_USD) continue;
+  const mcap =
+    typeof r.mcap === "number" ? Math.trunc(r.mcap) : null;
+  protocols.push({
+    slug: String(r.slug),
+    name: String(r.name),
+    category: r.category === undefined ? null : r.category,
+    chains: Array.isArray(r.chains) ? r.chains.map(String) : [],
+    tvl_usd: tvl,
+    change_7d:
+      typeof r.change_7d === "number" ? r.change_7d : null,
+    mcap_usd: mcap,
+    listed_at: dayOf(r.listedAt ?? null),
+    gecko_id: nullIfDash(r.gecko_id ?? null),
+    symbol: nullIfDash(r.symbol ?? null),
+    // Internal only: DefiLlama's parent record, used by the watchlist
+    // rule, stripped before the snapshot is written (it is not one of
+    // the snapshot's ten fields).
+    parent_protocol: r.parentProtocol === undefined ? null : r.parentProtocol,
+  });
+}
+protocols.sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+
+const watchlist = protocols.filter(onWatchlist).map((p) => p.slug);
+
+// Strip the internal field: snapshot rows carry exactly ten fields.
+for (const p of protocols) delete p.parent_protocol;
+
 const snapshot = {
   as_of: asOf,
-  source: `DefiLlama ${ENDPOINT}, fetched ${fetchedAt.toISOString()}`,
-  floor_usd: FLOOR_USD,
+  source: `${ENDPOINT} fetched ${now.toISOString()}`,
+  floor_usd: FLOOR_WATCHLIST_USD,
   protocols,
   watchlist,
 };
 
-// Sanity checks before writing anything.
-if (protocols.length < 100) throw new Error(`too few protocols: ${protocols.length}`);
-if (watchlist.length < 10) throw new Error(`too few watchlist: ${watchlist.length}`);
-for (let i = 1; i < protocols.length; i++) {
-  if (protocols[i - 1].slug >= protocols[i].slug) {
-    throw new Error(`protocols not sorted at index ${i}`);
-  }
-}
-for (const p of protocols) {
-  if (p.tvl_usd < MIN_TVL_USD) throw new Error(`protocol below floor: ${p.slug}`);
-}
-const slugs = new Set(protocols.map((p) => p.slug));
-for (const s of watchlist) {
-  if (!slugs.has(s)) throw new Error(`watchlist slug missing from protocols: ${s}`);
-}
+mkdirSync("input", { recursive: true });
+writeFileSync("input/snapshot.json", JSON.stringify(snapshot, null, 2) + "\n");
 
-const outPath = join(ROOT, "input", "snapshot.json");
-const text = JSON.stringify(snapshot, null, 1) + "\n";
-writeFileSync(outPath, text);
-
-const cats = new Set(protocols.map((p) => p.category));
-const traded = protocols.filter((p) => p.mcap_usd != null).length;
-console.log(`raw records: ${raw.length}`);
-console.log(`protocols >= $5M: ${protocols.length}`);
-console.log(`watchlist: ${watchlist.length}`);
-console.log(`categories: ${cats.size}`);
-console.log(`traded (mcap set): ${traded}`);
-console.log(`with listed_at: ${protocols.filter((p) => p.listed_at).length}`);
-console.log(`with change_7d: ${protocols.filter((p) => p.change_7d != null).length}`);
-console.log(`min tvl_usd: ${Math.min(...protocols.map((p) => p.tvl_usd))}`);
-console.log(`as_of: ${asOf}`);
-console.log(`wrote ${outPath} (${text.length} bytes, ${text.split("\n").length - 1} lines)`);
+const traded = protocols.filter((p) => (p.mcap_usd ?? 0) > 0).length;
+const cats = new Set(protocols.map((p) => p.category).filter(Boolean)).size;
+console.log(`as_of ${asOf} | raw ${raw.length} | protocols ${protocols.length} | watchlist ${watchlist.length} | traded ${traded} | categories ${cats}`);

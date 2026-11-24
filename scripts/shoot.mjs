@@ -1,130 +1,105 @@
-// shoot.mjs — takes the three dashboard screenshots via Chrome DevTools.
-// Usage: node scripts/shoot.mjs
-// Chrome's --headless --screenshot flag writes no file in this VM, so the
-// script drives Chrome over CDP: launch with a debugging port, navigate,
-// wait for the page to render, capture JPEG at 1440x900.
+// shoot.mjs — take the 3 dossier screenshots with the vanilla Chrome for
+// Testing from the Playwright cache, driven over CDP with Node's built-in
+// WebSocket (no packages). Usage:
+//   node scripts/shoot.mjs --out out --shots screenshots
+// Views: board (index.html), detail rank #1 (#detail), watchlist filter
+// (#watchlist). 1440x900 JPEG, quality 80.
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 
-// The system browser (/opt/meta-chromium/chrome) refuses to start without
-// a Hatch WebGL domain policy file, so screenshots use the vanilla Chrome
-// for Testing from the Playwright cache instead.
-const CHROME = "/home/hatch/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome";
-const PORT = 9333;
-const PROFILE = "/tmp/cr-token-radar2";
-const ROOT = new URL("..", import.meta.url).pathname;
-const OUT = join(ROOT, "out", "dashboard");
-const SHOTS = [
-  { name: "01-board.jpg", url: "index.html" },
-  { name: "02-detail.jpg", url: "index.html?view=detail&slug=steakhouse-financial" },
-  { name: "03-watchlist.jpg", url: "index.html?scope=watchlist" },
-];
-const QUALITY = 85;
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+function arg(name, fallback) {
+  const at = process.argv.indexOf(`--${name}`);
+  if (at >= 0 && at + 1 < process.argv.length) return process.argv[at + 1];
+  return fallback;
 }
 
-async function waitForEndpoint() {
-  for (let i = 0; i < 60; i++) {
+const out = resolve(arg("out", "out"));
+const shotsDir = resolve(arg("shots", "screenshots"));
+const chrome =
+  arg("chrome", "") ||
+  `${process.env.HOME}/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome`;
+if (!existsSync(chrome)) throw new Error(`no Chrome at ${chrome}`);
+
+const PORT = 9333;
+const views = [
+  { file: "01-board.jpg", url: `file://${out}/dashboard/index.html` },
+  { file: "02-detail.jpg", url: `file://${out}/dashboard/index.html#detail` },
+  { file: "03-watchlist.jpg", url: `file://${out}/dashboard/index.html#watchlist` },
+];
+
+mkdirSync(shotsDir, { recursive: true });
+const proc = spawn(chrome, [
+  "--headless=new",
+  `--remote-debugging-port=${PORT}`,
+  "--no-sandbox",
+  "--disable-gpu",
+  "--hide-scrollbars",
+  "--window-size=1440,900",
+  "about:blank",
+], { stdio: "ignore" });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitForVersion() {
+  for (let i = 0; i < 50; i++) {
     try {
       const res = await fetch(`http://127.0.0.1:${PORT}/json/version`);
       if (res.ok) return await res.json();
-    } catch {
-      /* not up yet */
-    }
-    await sleep(500);
+    } catch { /* not up yet */ }
+    await sleep(200);
   }
-  throw new Error("chrome debugging endpoint did not come up");
+  throw new Error("Chrome DevTools did not come up");
 }
 
-async function main() {
-  mkdirSync(join(ROOT, "screenshots"), { recursive: true });
-  const chrome = spawn(CHROME, [
-    "--headless=new",
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--hide-scrollbars",
-    `--remote-debugging-port=${PORT}`,
-    `--user-data-dir=${PROFILE}`,
-    "--window-size=1440,900",
-    "about:blank",
-  ], { stdio: "ignore" });
-  try {
-    const version = await waitForEndpoint();
-    const ws = new WebSocket(version.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => {
-      ws.onopen = resolve;
-      ws.onerror = reject;
+async function newTarget(url) {
+  const res = await fetch(`http://127.0.0.1:${PORT}/json/new?${encodeURIComponent(url)}`, { method: "PUT" });
+  if (!res.ok) throw new Error(`new target failed: ${res.status}`);
+  return await res.json();
+}
+
+let msgId = 0;
+const pending = new Map();
+function send(ws, method, params = {}) {
+  return new Promise((resolvePromise, reject) => {
+    const id = ++msgId;
+    pending.set(id, { resolvePromise, reject });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+}
+
+try {
+  await waitForVersion();
+  for (const view of views) {
+    const target = await newTarget("about:blank");
+    const ws = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise((res, rej) => {
+      ws.onopen = res;
+      ws.onerror = rej;
     });
-    let nextId = 1;
-    const pending = new Map();
-    const events = [];
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
-      if (msg.id !== undefined && pending.has(msg.id)) {
-        pending.get(msg.id)(msg);
+      if (msg.id && pending.has(msg.id)) {
+        const { resolvePromise, reject } = pending.get(msg.id);
         pending.delete(msg.id);
-      } else if (msg.method) {
-        events.push(msg);
+        if (msg.error) reject(new Error(msg.error.message));
+        else resolvePromise(msg.result);
       }
     };
-    function send(method, params = {}) {
-      const id = nextId++;
-      ws.send(JSON.stringify({ id, method, params }));
-      return new Promise((resolve) => pending.set(id, resolve));
-    }
-    async function waitEvent(method, timeoutMs = 15000) {
-      const start = Date.now();
-      while (Date.now() - start < timeoutMs) {
-        const i = events.findIndex((e) => e.method === method);
-        if (i >= 0) return events.splice(i, 1)[0];
-        await sleep(100);
-      }
-      throw new Error(`timeout waiting for ${method}`);
-    }
-    for (const shot of SHOTS) {
-      const { result } = await send("Target.createTarget", {
-        url: "about:blank",
-      });
-      const targetId = result.targetId;
-      const attached = await send("Target.attachToTarget", { targetId, flatten: true });
-      const sessionId = attached.result.sessionId;
-      const sendTo = (method, params = {}) => {
-        const id = nextId++;
-        ws.send(JSON.stringify({ id, sessionId, method, params }));
-        return new Promise((resolve) => pending.set(id, resolve));
-      };
-      await sendTo("Page.enable");
-      await sendTo("Emulation.setDeviceMetricsOverride", {
-        width: 1440,
-        height: 900,
-        deviceScaleFactor: 1,
-        mobile: false,
-      });
-      await sendTo("Page.navigate", { url: `file://${OUT}/${shot.url}` });
-      await waitEvent("Page.loadEventFired");
-      await sleep(1800); // let data.js render the tables
-      const shotRes = await sendTo("Page.captureScreenshot", {
-        format: "jpeg",
-        quality: QUALITY,
-        clip: { x: 0, y: 0, width: 1440, height: 900, scale: 1 },
-      });
-      const buf = Buffer.from(shotRes.result.data, "base64");
-      writeFileSync(join(ROOT, "screenshots", shot.name), buf);
-      console.log(`${shot.name}: ${buf.length} bytes`);
-      await send("Target.closeTarget", { targetId });
-    }
+    await send(ws, "Page.enable");
+    await send(ws, "Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await send(ws, "Page.navigate", { url: view.url });
+    await sleep(2500);
+    const ready = await send(ws, "Runtime.evaluate", { expression: "document.querySelectorAll('#board tr').length", returnByValue: true });
+    const nRows = ready?.result?.value ?? 0;
+    const shot = await send(ws, "Page.captureScreenshot", { format: "jpeg", quality: 80 });
+    const buf = Buffer.from(shot.data, "base64");
+    writeFileSync(join(shotsDir, view.file), buf);
+    console.log(`${view.file}: ${buf.length} bytes, board rows rendered: ${nRows}`);
     ws.close();
-  } finally {
-    chrome.kill("SIGKILL");
+    await sleep(300);
   }
-  console.log("done");
+} finally {
+  proc.kill("SIGKILL");
 }
-
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+console.log("screenshots done");

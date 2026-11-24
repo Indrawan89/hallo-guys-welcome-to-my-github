@@ -2,88 +2,47 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token launch radar — value from the snapshot's own figures</title>
+<title>Token Launch Radar — fitted value, token odds, farm plans</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header class="top">
-  <div class="titleblock">
-    <h1>Token launch radar</h1>
-    <p class="sub">Which pre-token protocols would be worth farming if their token priced like the tokens that already trade — fitted from one public snapshot, nothing hardcoded.</p>
-    <p class="meta" id="metaLine">Loading snapshot…</p>
-  </div>
-  <div class="kpis" id="kpis"></div>
+<header>
+  <h1>Token Launch Radar</h1>
+  <p id="asof" class="dim"></p>
+  <div id="kpis" class="kpis"></div>
+  <div id="audit" class="audit"></div>
 </header>
-<nav class="tabs" id="tabs">
-  <button data-tab="board" class="active">Board</button>
-  <button data-tab="detail">Detail</button>
-  <button data-tab="method">Methodology</button>
-  <button data-tab="census">Census</button>
-  <button data-tab="research">Research note</button>
-  <button data-tab="live">Live tokens</button>
+<nav>
+  <button class="tab active" data-pane="pane-board">Board</button>
+  <button class="tab" id="tab-detail" data-pane="pane-detail">Detail</button>
+  <button class="tab" data-pane="pane-method">Methodology</button>
+  <button class="tab" data-pane="pane-census">Census</button>
+  <button class="tab" data-pane="pane-research">Research note</button>
 </nav>
-<main>
-  <section id="tab-board" class="tab active">
-    <div class="controls">
-      <input id="q" type="search" placeholder="Filter by name or slug…" aria-label="Filter by name or slug">
-      <select id="fScope" aria-label="Filter by scope">
-        <option value="">All scopes</option>
-        <option value="watchlist">Watchlist</option>
-        <option value="early">Early finds</option>
-      </select>
-      <select id="fCat" aria-label="Filter by category"><option value="">All categories</option></select>
-      <select id="fChain" aria-label="Filter by chain"><option value="">All chains</option></select>
-      <span id="countLine" class="count"></span>
-    </div>
-    <div class="tablewrap">
-      <table id="boardTable">
-        <thead>
-          <tr>
-            <th data-sort="rank">Rank</th>
-            <th data-sort="name">Protocol</th>
-            <th data-sort="scope">Scope</th>
-            <th data-sort="category">Category</th>
-            <th data-sort="tvl_usd">TVL</th>
-            <th data-sort="implied_value_usd">Implied value</th>
-            <th data-sort="odds">Token odds</th>
-            <th data-sort="band">90% band</th>
-          </tr>
-        </thead>
-        <tbody id="boardBody"></tbody>
-      </table>
-    </div>
-    <p class="hint">Click a column header to sort. Click a protocol name for its detail page, farm plan and nearest traded comps.</p>
-  </section>
-  <section id="tab-detail" class="tab">
-    <div id="detailBody"><p class="hint">Pick a protocol from the Board tab to see its model breakdown, bootstrap band, nearest comps and farm plan.</p></div>
-  </section>
-  <section id="tab-method" class="tab">
-    <h2>How the numbers are made</h2>
-    <div id="methodBody"></div>
-  </section>
-  <section id="tab-census" class="tab">
-    <h2>Census — every protocol in the snapshot, accounted for</h2>
-    <div id="censusBody"></div>
-  </section>
-  <section id="tab-research" class="tab">
-    <h2>Research note — what the fit says, and what it does not</h2>
-    <div id="researchBody"></div>
-  </section>
-  <section id="tab-live" class="tab">
-    <h2>Live tokens — the traded comps the curve is fitted on</h2>
-    <div class="tablewrap">
-      <table id="liveTable">
-        <thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>Multiple</th><th>7d change</th><th>Listed</th></tr></thead>
-        <tbody id="liveBody"></tbody>
-      </table>
-    </div>
-  </section>
-</main>
-<footer>
-  <p>Data: DefiLlama public protocols endpoint (api.llama.fi/protocols), one fetch, snapshot date shown above. Gas figures in farm plans are assumptions, not measured fees. Nothing here is investment advice.</p>
-</footer>
+<section id="pane-board" class="pane active">
+  <div class="controls">
+    <input id="q" type="search" placeholder="Search name, slug or category">
+    <label><input id="watchonly" type="checkbox"> Watchlist only</label>
+    <select id="catfilter"></select>
+    <span id="rowcount" class="dim"></span>
+  </div>
+  <table>
+    <thead><tr>
+      <th>#</th><th>Protocol</th><th>Category</th>
+      <th data-sort="tvl" class="num">TVL ↕</th><th>7d</th>
+      <th data-sort="odds" class="num">Odds ↕</th>
+      <th data-sort="implied" class="num">Implied ↕</th><th class="num">Net expected</th>
+    </tr></thead>
+    <tbody id="board"></tbody>
+  </table>
+  <p class="dim">Click a row for its detail view. Implied value = 10^curve × token odds. Net expected = implied × odds − gas.</p>
+</section>
+<section id="pane-detail" class="pane"><div id="detail"><p class="dim">Click a board row to see its detail.</p></div></section>
+<section id="pane-method" class="pane"><div id="method"></div></section>
+<section id="pane-census" class="pane"><div id="census"></div></section>
+<section id="pane-research" class="pane"><div id="research"></div></section>
 <script src="../data.js"></script>
+<script src="recompute.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

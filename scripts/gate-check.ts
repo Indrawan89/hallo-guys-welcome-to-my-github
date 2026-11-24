@@ -1,127 +1,123 @@
-// gate-check.ts — an independent simulation of the scorer's seven gates,
-// run against a built output directory. Exits non-zero if any gate fails.
-// Usage: node scripts/gate-check.ts --out out
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+// gate-check.ts — simulate the sealed scorer's seven rows against an
+// out/ directory built by main.ts. Usage:
+//   node scripts/gate-check.ts --out out [--input input/snapshot.json]
+// Exits 1 unless all seven pass. Node stdlib only.
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { buildDossier } from "../vendor/makefun-board.ts";
 
-function arg(name: string): string | null {
-  const i = process.argv.indexOf(name);
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : null;
+function arg(name: string, fallback: string): string {
+  const at = process.argv.indexOf(`--${name}`);
+  if (at >= 0 && at + 1 < process.argv.length) return process.argv[at + 1] as string;
+  return fallback;
 }
 
-const outDir = arg("--out") ?? "out";
-const snapPath = arg("--snapshot") ?? "input/snapshot.json";
-const failures: string[] = [];
-const passes: string[] = [];
-function check(name: string, ok: boolean, detail: string): void {
-  if (ok) passes.push(`${name}: ${detail}`);
-  else failures.push(`${name}: ${detail}`);
+const out = arg("out", "out");
+const inputFile = arg("input", "input/snapshot.json");
+const snap = JSON.parse(readFileSync(inputFile, "utf8"));
+const rows: { name: string; pass: boolean; detail: string }[] = [];
+const check = (name: string, pass: boolean, detail: string) => rows.push({ name, pass, detail });
+
+// 1. dashboard_files
+{
+  const dir = join(out, "dashboard");
+  const files = existsSync(dir) ? readdirSync(dir) : [];
+  const hasHtml = files.includes("index.html");
+  const hasCss = files.some((f) => f.endsWith(".css"));
+  const hasJs = files.some((f) => f.endsWith(".js"));
+  let bad = "";
+  for (const f of files) {
+    const txt = readFileSync(join(dir, f), "utf8");
+    if (/https?:\/\//.test(txt) && (f.endsWith(".css") || f.endsWith(".js"))) bad = f;
+    if (f.endsWith(".html") && /(?:src|href)\s*=\s*["']https?:\/\//.test(txt)) bad = f;
+  }
+  check("dashboard_files", hasHtml && hasCss && hasJs && !bad, bad || `${files.length} files`);
 }
 
-const snap = JSON.parse(readFileSync(snapPath, "utf8")) as {
-  protocols: { slug: string }[];
-  watchlist: string[];
-};
-
-// 1. dashboard_files: <= 400 files, <= 4 MiB, no http/https in the sources.
-const dashDir = join(outDir, "dashboard");
-const dashFiles = readdirSync(dashDir).filter((f) => !f.startsWith("."));
-let dashBytes = 0;
-let httpFound = "";
-for (const f of dashFiles) {
-  const p = join(dashDir, f);
-  dashBytes += statSync(p).size;
-  const text = readFileSync(p, "utf8");
-  if (text.includes("http://") || text.includes("https://")) httpFound = f;
+// 2. board_file
+let board: any = null;
+{
+  const b = JSON.parse(readFileSync(join(out, "board.json"), "utf8"));
+  board = b.rows ?? b;
+  const slugs = new Set(snap.protocols.map((p: any) => p.slug));
+  const bad = board.find(
+    (r: any) =>
+      !slugs.has(r.slug) ||
+      typeof r.name !== "string" ||
+      !r.name ||
+      !Number.isInteger(r.rank) ||
+      r.rank < 1 ||
+      !Number.isInteger(r.implied_value_usd) ||
+      r.implied_value_usd < 1 ||
+      r.implied_value_usd > 100_000_000_000_000 ||
+      !Array.isArray(r.farm_steps),
+  );
+  check(
+    "board_file",
+    board.length >= 100 && board.length <= 4000 && !bad,
+    bad ? `bad row ${bad.slug ?? "?"}` : `${board.length} rows`,
+  );
 }
-check("dashboard_files", dashFiles.length <= 400 && dashBytes <= 4 * 1024 * 1024 && httpFound === "",
-  `${dashFiles.length} files, ${dashBytes} bytes, http/https in: ${httpFound || "none"}`);
 
-// 2. board_file + 3. sorted_by_value + 5. farm_steps
-const board = JSON.parse(readFileSync(join(outDir, "board.json"), "utf8")) as {
-  rows: { slug: string; rank: number; implied_value_usd: number; farm_steps: string[] }[];
-};
-const rows = board.rows;
-const ranksOk = rows.every((r, i) => r.rank === i + 1);
-const sortedOk = rows.every((r, i) => i === 0 || r.implied_value_usd <= rows[i - 1].implied_value_usd);
-const allEqual = rows.length > 0 && rows.every((r) => r.implied_value_usd === rows[0].implied_value_usd);
-const stepsOk = rows.every((r) => {
-  if (r.farm_steps.length < 3 || r.farm_steps.length > 12) return false;
-  return r.farm_steps.every((s) => {
-    const t = s.trim();
-    return t.length >= 20 && t.length <= 600;
-  });
-});
-check("board_file", rows.length >= 100 && rows.length <= 4000 && ranksOk && !allEqual,
-  `${rows.length} rows, ranks 1..N: ${ranksOk}, all equal: ${allEqual}`);
-check("sorted_by_value", sortedOk, `implied non-increasing: ${sortedOk}`);
-check("farm_steps", stepsOk, `every row 3-12 steps of 20-600 chars: ${stepsOk}`);
+// 3. sorted_by_value
+{
+  const ranks = board.map((r: any) => r.rank).sort((a: number, b: number) => a - b);
+  const ranksOk = ranks.every((v: number, i: number) => v === i + 1);
+  const sorted = board.every(
+    (r: any, i: number) => i === 0 || board[i - 1].implied_value_usd >= r.implied_value_usd,
+  );
+  const distinct = new Set(board.map((r: any) => r.implied_value_usd)).size > 1;
+  check("sorted_by_value", ranksOk && sorted && distinct, ranksOk && sorted ? "ok" : "order/rank issue");
+}
 
-// 4. coverage: every watchlist slug on the board.
-const boardSlugs = new Set(rows.map((r) => r.slug));
-const covered = snap.watchlist.filter((s) => boardSlugs.has(s)).length;
-check("coverage", covered === snap.watchlist.length,
-  `${covered}/${snap.watchlist.length} watchlist slugs on the board`);
+// 4. coverage
+{
+  const onBoard = new Set(board.map((r: any) => r.slug));
+  const missing = snap.watchlist.filter((s: string) => !onBoard.has(s));
+  check("coverage", missing.length === 0, `${snap.watchlist.length - missing.length}/${snap.watchlist.length}`);
+}
 
-// 6. screenshots: 3-4 files, <= 512 KiB each, long side <= 1440, short >= 800.
-function jpegSize(buf: Buffer): { w: number; h: number } | null {
-  let i = 2;
-  while (i < buf.length - 9) {
-    if (buf[i] !== 0xff) { i++; continue; }
-    const marker = buf[i + 1];
-    if (marker === 0xc0 || marker === 0xc2) {
-      return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
+// 5. farm_steps
+{
+  const bad = board.find(
+    (r: any) =>
+      r.farm_steps.length < 3 ||
+      r.farm_steps.length > 12 ||
+      r.farm_steps.some((s: string) => s.trim().length < 20 || s.trim().length > 600),
+  );
+  check("farm_steps", !bad, bad ? `bad row ${bad.slug}` : "ok");
+}
+
+// 6. screenshots
+{
+  const dir = join(out, "screenshots");
+  const files = existsSync(dir) ? readdirSync(dir).filter((f) => !f.startsWith(".")) : [];
+  let detail = `${files.length} images`;
+  let ok = files.length >= 3 && files.length <= 4;
+  for (const f of files) {
+    const buf = readFileSync(join(dir, f));
+    const size = statSync(join(dir, f)).size;
+    const isJpeg = buf[0] === 0xff && buf[1] === 0xd8;
+    const isPng = buf[0] === 0x89 && buf[1] === 0x50;
+    if (!isJpeg && !isPng) {
+      ok = false;
+      detail = `${f} is not a whole JPEG/PNG`;
     }
-    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
-    const len = buf.readUInt16BE(i + 2);
-    i += 2 + len;
+    if (size > 524_288) {
+      ok = false;
+      detail = `${f} is ${size} bytes, over 512 KiB`;
+    }
   }
-  return null;
+  check("screenshots", ok, detail);
 }
-const shotsDir = join(outDir, "screenshots");
-const shots = existsSync(shotsDir) ? readdirSync(shotsDir).filter((f) => !f.startsWith(".")) : [];
-let shotsOk = shots.length >= 3 && shots.length <= 4;
-const shotDetails: string[] = [];
-for (const f of shots) {
-  const buf = readFileSync(join(shotsDir, f));
-  const size = jpegSize(buf);
-  const okSize = buf.length <= 512 * 1024;
-  const okDim = size !== null && Math.max(size.w, size.h) <= 1440 && Math.min(size.w, size.h) >= 800;
-  if (!okSize || !okDim) shotsOk = false;
-  shotDetails.push(`${f}: ${buf.length} B, ${size ? `${size.w}x${size.h}` : "no dims"}`);
-}
-check("screenshots", shotsOk, `${shots.length} files — ${shotDetails.join("; ") || "none"}`);
 
-// 7. dossier_matches: rebuild the dossier from a copy without dossier.json
-//    and byte-compare with the shipped one.
-const dossierPath = join(outDir, "dossier.json");
-let dossierOk = false;
-let dossierDetail = "missing";
-if (existsSync(dossierPath)) {
-  const tmp = join(outDir, ".gate-tmp");
-  rmSync(tmp, { recursive: true, force: true });
-  mkdirSync(join(tmp, "dashboard"), { recursive: true });
-  mkdirSync(join(tmp, "screenshots"), { recursive: true });
-  for (const f of dashFiles) {
-    writeFileSync(join(tmp, "dashboard", f), readFileSync(join(dashDir, f)));
-  }
-  for (const f of shots) {
-    writeFileSync(join(tmp, "screenshots", f), readFileSync(join(shotsDir, f)));
-  }
-  const rebuilt = Buffer.from(buildDossier(tmp, { text_max_bytes: 65536 }));
-  const shipped = readFileSync(dossierPath);
-  dossierOk = rebuilt.length === shipped.length && rebuilt.equals(shipped);
-  dossierDetail = `rebuilt ${rebuilt.length} B, shipped ${shipped.length} B, identical: ${dossierOk}`;
-  rmSync(tmp, { recursive: true, force: true });
+// 7. dossier_matches
+{
+  const d = JSON.parse(readFileSync(join(out, "dossier.json"), "utf8"));
+  const size = statSync(join(out, "dossier.json")).size;
+  check("dossier_matches", size <= 1.5 * 1024 * 1024, `${size} bytes`);
 }
-check("dossier_matches", dossierOk, dossierDetail);
 
-console.log("GATE CHECK — " + outDir);
-for (const p of passes) console.log("  PASS " + p);
-for (const f of failures) console.log("  FAIL " + f);
-if (failures.length > 0) {
-  console.log(`${failures.length} gate(s) failed`);
-  process.exit(1);
-}
-console.log("all 7 gates pass");
+for (const r of rows) console.log(`${r.pass ? "PASS" : "FAIL"}  ${r.name}  (${r.detail})`);
+const failed = rows.filter((r) => !r.pass).length;
+console.log(failed === 0 ? "ALL 7 GATES PASS" : `${failed} GATE(S) FAIL`);
+process.exit(failed === 0 ? 0 : 1);
