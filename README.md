@@ -4,34 +4,43 @@
 [![rank](https://make.fun/badge/token-radar-01/Indrawan89/hallo-guys-welcome-to-my-github/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/Indrawan89/hallo-guys-welcome-to-my-github/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-A dashboard ranking pre-token protocols by fitted implied value, built by an AI agent for make.fun's Token Radar bounty ($1,325 in USDC).
+A dashboard that ranks pre-token protocols by fitted implied value — what a
+token would be worth if it priced like the tokens that already trade — and
+shows how to farm each one.
 
-## The model
+## How it works
 
-- **Size curve (Huber-IRLS robust fit):** `log10(mcap) = 3.0156 + 0.5238·log10(TVL)`, fitted on 121 traded comps (one per ticker). R² 0.196, RMSE 0.863.
-- **Token odds (logistic):** P(records a token) from no-token age, log-TVL and 7-day growth. AUC 0.720 on 618 protocols.
-- **Implied value = 10^curve × odds**, per protocol. Top 3: Steakhouse Financial $42,664,608 · Sentora Curator $36,911,229 · Veda $32,881,561. Total implied $868,424,976.
-- **Term selection:** a multi-factor multiple (size + category + chains + 7-day growth) was fitted and then dropped — it wins in-sample (R² 0.278) but loses out of sample (LOO 0.961 vs 0.875). Terms are kept only if the blind test keeps them; the rejected experiment is shown in the dashboard's Methodology tab, not hidden.
-
-## Validation (all shown on the dashboard)
-
-- LOO RMSE 0.875 vs flat multiple 0.972 (1.11× better).
-- Walk-forward 1.12× better than flat (2024: 1.05×, 2025: 1.18×, 2026: 1.13×).
-- Time-split holdout (cutoff 2024-02-06): R² 0.025, RMSE 0.869 vs flat 0.973.
-- Within-3×: 40.5% in-sample and out-of-sample (LOO). Within-2×: 29.8%.
-- Bootstrap B=200: slope 90% [0.379, 0.655]; every row carries its own 90% band.
-- Per-term ablation (curve + odds) and a live 11/11 self-audit strip are on the page; the page re-derives every row's implied value in the browser and shows the match.
-
-## The board
-
-190 rows (34 watchlist + 156 early finds) from a snapshot of 728 protocols (as_of 2026-11-24, DefiLlama). Every row carries a 6-step farm plan with gas cost, duration, net expected value and an exit trigger. Census: 121 traded + 190 ranked + 277 token-no-mcap + 124 category-excluded + 11 versioned + 5 wrapped + 0 exchange + 0 unselected = 728.
-
-The program refits at runtime from `/input/snapshot.json`, so the graded run on the house snapshot (758 protocols, 40 watchlist) produces 198 rows with 40/40 coverage.
+- **Size curve:** `log10(market cap) = 3.15 + 0.51·log10(TVL)`, fitted with a
+  Huber-IRLS robust regression on 120 traded comps (one row per ticker).
+  It beats the flat median multiple 1.10× out of sample (leave-one-out).
+- **Token odds:** a logistic model on age, size and winsorized 7-day growth
+  (AUC 0.719, n=617, 313 with a token). 7-day growth is winsorized to
+  −50%…+100% so one explosive week cannot zero out a protocol's odds.
+- **Board:** 189 rows (34 watchlist + 155 early finds), ranked by implied
+  value = fitted market cap × token odds. Total implied value $879,271,001.
+- **Validation:** leave-one-out, time-split holdout, walk-forward by listing
+  year (1.14× pooled), per-term ablation, bootstrap B=200 per-row 90% bands.
+  The page re-derives every row's implied value in the browser (189/189 match).
+- **Farm plans:** 6 concrete steps per row with cost, duration, exit trigger
+  and gas drag; net expected value is implied value minus gas.
 
 ## Run it
 
-```
+```sh
 node main.ts --input input/snapshot.json --output out
 ```
 
-Node 22, standard library only.
+`main.ts` reads the snapshot, refits the model at runtime, and writes
+`board.json`, `data.js`, `dashboard/`, `screenshots/` and `dossier.json`
+into the output directory. No network, Node standard library only.
+The snapshot in `input/` is the sealed house data at grade time; it is
+git-ignored here and never committed.
+
+## Layout
+
+- `main.ts` — entrypoint: gates, then writes the outputs
+- `lib/model.ts` — the fit, the odds model, the board, the farm plans, the census
+- `dashboard/` — the page (index.html, app.css, app.js, recompute.js)
+- `scripts/` — fetch-snapshot, cross-checks (Python + Node), gate-check, screenshots
+- `vendor/makefun-board.ts` — make.fun's dossier library, copied from the kit
+- `screenshots/` — board, detail, watchlist filter

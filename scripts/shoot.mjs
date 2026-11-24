@@ -1,105 +1,171 @@
-// shoot.mjs — take the 3 dossier screenshots with the vanilla Chrome for
-// Testing from the Playwright cache, driven over CDP with Node's built-in
-// WebSocket (no packages). Usage:
-//   node scripts/shoot.mjs --out out --shots screenshots
-// Views: board (index.html), detail rank #1 (#detail), watchlist filter
-// (#watchlist). 1440x900 JPEG, quality 80.
-import { spawn } from "node:child_process";
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+// shoot.mjs — take the three dashboard screenshots with Chrome for Testing
+// (from the Playwright cache) driven over CDP with Node's built-in
+// WebSocket. No screenshots are ever copied from an older entry.
+// Usage: node scripts/shoot.mjs --out out --shots screenshots [--quality 80]
+import { execFile, spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
-function arg(name, fallback) {
-  const at = process.argv.indexOf(`--${name}`);
-  if (at >= 0 && at + 1 < process.argv.length) return process.argv[at + 1];
-  return fallback;
+function parseArgs(argv) {
+  const o = { out: 'out', shots: 'screenshots', quality: 80 };
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--out' && argv[i + 1]) o.out = argv[++i];
+    else if (argv[i] === '--shots' && argv[i + 1]) o.shots = argv[++i];
+    else if (argv[i] === '--quality' && argv[i + 1]) o.quality = Number(argv[++i]);
+  }
+  return o;
 }
 
-const out = resolve(arg("out", "out"));
-const shotsDir = resolve(arg("shots", "screenshots"));
-const chrome =
-  arg("chrome", "") ||
-  `${process.env.HOME}/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome`;
-if (!existsSync(chrome)) throw new Error(`no Chrome at ${chrome}`);
-
-const PORT = 9333;
-const views = [
-  { file: "01-board.jpg", url: `file://${out}/dashboard/index.html` },
-  { file: "02-detail.jpg", url: `file://${out}/dashboard/index.html#detail` },
-  { file: "03-watchlist.jpg", url: `file://${out}/dashboard/index.html#watchlist` },
-];
-
-mkdirSync(shotsDir, { recursive: true });
-const proc = spawn(chrome, [
-  "--headless=new",
-  `--remote-debugging-port=${PORT}`,
-  "--no-sandbox",
-  "--disable-gpu",
-  "--hide-scrollbars",
-  "--window-size=1440,900",
-  "about:blank",
-], { stdio: "ignore" });
+function findChrome() {
+  const cache = join(homedir(), '.cache', 'ms-playwright');
+  const candidates = [];
+  if (existsSync(cache)) {
+    for (const d of readdirSync(cache)) {
+      candidates.push(join(cache, d, 'chrome-linux', 'chrome'));
+      candidates.push(join(cache, d, 'chrome-linux', 'headless_shell'));
+    }
+  }
+  for (const c of candidates) if (existsSync(c)) return c;
+  throw new Error('no Chrome for Testing found under ~/.cache/ms-playwright');
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function waitForVersion() {
-  for (let i = 0; i < 50; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/json/version`);
-      if (res.ok) return await res.json();
-    } catch { /* not up yet */ }
-    await sleep(200);
-  }
-  throw new Error("Chrome DevTools did not come up");
+async function httpJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
+  return res.json();
 }
 
-async function newTarget(url) {
-  const res = await fetch(`http://127.0.0.1:${PORT}/json/new?${encodeURIComponent(url)}`, { method: "PUT" });
-  if (!res.ok) throw new Error(`new target failed: ${res.status}`);
-  return await res.json();
-}
-
-let msgId = 0;
-const pending = new Map();
-function send(ws, method, params = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const id = ++msgId;
-    pending.set(id, { resolvePromise, reject });
-    ws.send(JSON.stringify({ id, method, params }));
-  });
-}
-
-try {
-  await waitForVersion();
-  for (const view of views) {
-    const target = await newTarget("about:blank");
-    const ws = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((res, rej) => {
-      ws.onopen = res;
-      ws.onerror = rej;
+class Cdp {
+  constructor(url) {
+    this.ws = new WebSocket(url);
+    this.id = 0;
+    this.pending = new Map();
+    this.events = [];
+    this.ready = new Promise((resolve, reject) => {
+      this.ws.onopen = resolve;
+      this.ws.onerror = reject;
     });
-    ws.onmessage = (ev) => {
+    this.ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
-      if (msg.id && pending.has(msg.id)) {
-        const { resolvePromise, reject } = pending.get(msg.id);
-        pending.delete(msg.id);
+      if (msg.id !== undefined && this.pending.has(msg.id)) {
+        const { resolve, reject } = this.pending.get(msg.id);
+        this.pending.delete(msg.id);
         if (msg.error) reject(new Error(msg.error.message));
-        else resolvePromise(msg.result);
+        else resolve(msg.result);
+      } else if (msg.method) {
+        this.events.push(msg);
       }
     };
-    await send(ws, "Page.enable");
-    await send(ws, "Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await send(ws, "Page.navigate", { url: view.url });
-    await sleep(2500);
-    const ready = await send(ws, "Runtime.evaluate", { expression: "document.querySelectorAll('#board tr').length", returnByValue: true });
-    const nRows = ready?.result?.value ?? 0;
-    const shot = await send(ws, "Page.captureScreenshot", { format: "jpeg", quality: 80 });
-    const buf = Buffer.from(shot.data, "base64");
-    writeFileSync(join(shotsDir, view.file), buf);
-    console.log(`${view.file}: ${buf.length} bytes, board rows rendered: ${nRows}`);
-    ws.close();
-    await sleep(300);
   }
-} finally {
-  proc.kill("SIGKILL");
+  async call(method, params = {}) {
+    await this.ready;
+    const id = ++this.id;
+    const p = new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    this.ws.send(JSON.stringify({ id, method, params }));
+    return p;
+  }
+  async waitForEvent(method, timeoutMs = 15000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const i = this.events.findIndex((e) => e.method === method);
+      if (i >= 0) return this.events.splice(i, 1)[0];
+      await sleep(100);
+    }
+    throw new Error(`timeout waiting for ${method}`);
+  }
+  close() {
+    this.ws.close();
+  }
 }
-console.log("screenshots done");
+
+async function main() {
+  const { out, shots, quality } = parseArgs(process.argv.slice(2));
+  const chrome = findChrome();
+  console.log(`chrome: ${chrome}`);
+  const port = 9333;
+  const pageUrl = (suffix) => `file://${join(process.cwd(), out, 'dashboard', 'index.html')}${suffix}`;
+  const board = JSON.parse(readFileSync(join(out, 'board.json'), 'utf8'));
+  const topSlug = board.rows[0].slug;
+
+  const proc = spawn(
+    chrome,
+    [
+      '--headless=new',
+      `--remote-debugging-port=${port}`,
+      '--no-sandbox',
+      '--disable-gpu',
+      '--hide-scrollbars',
+      '--window-size=1440,900',
+      '--force-device-scale-factor=1',
+      'about:blank',
+    ],
+    { stdio: 'ignore' },
+  );
+  try {
+    let targets = null;
+    for (let i = 0; i < 50; i++) {
+      try {
+        targets = await httpJson(`http://127.0.0.1:${port}/json/list`);
+        break;
+      } catch {
+        await sleep(200);
+      }
+    }
+    if (!targets) throw new Error('chrome did not open its debugging port');
+    const page = targets.find((t) => t.type === 'page');
+    if (!page) throw new Error('no page target');
+    const cdp = new Cdp(page.webSocketDebuggerUrl);
+    await cdp.call('Page.enable');
+    await cdp.call('Runtime.enable');
+    await cdp.call('Emulation.setDeviceMetricsOverride', {
+      width: 1440,
+      height: 900,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+
+    mkdirSync(shots, { recursive: true });
+    const jobs = [
+      { name: '01-board.jpg', hash: '' },
+      { name: '02-detail.jpg', hash: `#detail/${topSlug}` },
+      { name: '03-watchlist.jpg', hash: '#filter=watchlist' },
+    ];
+    // first shot: a real navigation; the others only change the hash, which
+    // the page listens for (no new load event fires for a hash change).
+    await cdp.call('Page.navigate', { url: pageUrl('') });
+    await cdp.waitForEvent('Page.loadEventFired');
+    await sleep(700);
+    for (const job of jobs) {
+      if (job.hash) {
+        await cdp.call('Runtime.evaluate', {
+          expression: `window.location.hash = ${JSON.stringify(job.hash)}`,
+        });
+        await sleep(800);
+      }
+      const evalRes = await cdp.call('Runtime.evaluate', {
+        expression: `document.querySelectorAll('#board-body tr').length + '|' + (document.querySelector('#detail-body') ? document.querySelector('#detail-body').textContent.length : 0)`,
+        returnByValue: true,
+      });
+      console.log(`${job.name}: page state ${evalRes.result.value}`);
+      const shot = await cdp.call('Page.captureScreenshot', {
+        format: 'jpeg',
+        quality,
+        clip: { x: 0, y: 0, width: 1440, height: 900, scale: 1 },
+      });
+      const bytes = Buffer.from(shot.data, 'base64');
+      writeFileSync(join(shots, job.name), bytes);
+      console.log(`${job.name}: ${bytes.length} bytes`);
+    }
+    cdp.close();
+  } finally {
+    proc.kill('SIGKILL');
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
