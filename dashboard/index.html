@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar — Pre-Token DeFi Value Model</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <h1>Token Radar</h1>
+    <p class="sub">Pre-token DeFi value model — fitted on the snapshot's own traded tokens. Snapshot as of <span id="asOf">—</span>, 758 protocols, floor $50M.</p>
+    <div class="kpis" id="kpis"></div>
+  </div>
+</header>
+<nav class="tabs wrap" id="tabs">
+  <button data-tab="board" class="on">Board</button>
+  <button data-tab="method">Methodology</button>
+  <button data-tab="census">Census 758</button>
+  <button data-tab="research">Research note</button>
+  <button data-tab="live">Live tokens</button>
+</nav>
+<main class="wrap">
+  <section id="view-board" class="view">
+    <div class="controls">
+      <input id="q" type="search" placeholder="Search name or slug…" aria-label="Search">
+      <select id="scope" aria-label="Scope">
+        <option value="">All scopes</option>
+        <option value="watchlist">Watchlist</option>
+        <option value="early">Early finds</option>
+      </select>
+      <select id="cat" aria-label="Category"><option value="">All categories</option></select>
+      <select id="chain" aria-label="Chain"><option value="">All chains</option></select>
+      <span id="count" class="count"></span>
+    </div>
+    <div id="detail"></div>
+    <div class="tablewrap"><table id="board">
+      <thead><tr>
+        <th data-k="rank">Rank</th><th data-k="name">Protocol</th><th data-k="category">Category</th>
+        <th data-k="chains">Chains</th><th data-k="tvl_usd">TVL</th><th data-k="change_7d">7d %</th>
+        <th data-k="curve_value_usd">Curve value</th><th data-k="token_odds">Token odds</th>
+        <th data-k="implied_value_usd">Implied value</th><th data-k="band">90% band</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+    <p class="note">Implied value = fitted curve value × token odds. Ranks by implied value, ties broken by slug. Token odds is a fitted score from the snapshot — not a prediction of when a token launches.</p>
+  </section>
+  <section id="view-method" class="view" hidden>
+    <h2>Methodology</h2>
+    <div id="method"></div>
+    <h3>Median mcap / TVL multiple by category (traded comps)</h3>
+    <div class="tablewrap"><table id="catTable">
+      <thead><tr><th>Category</th><th>Comps</th><th>Median multiple</th></tr></thead>
+      <tbody id="catRows"></tbody>
+    </table></div>
+  </section>
+  <section id="view-census" class="view" hidden>
+    <h2>Census — all 758 protocols accounted for</h2>
+    <div id="census"></div>
+  </section>
+  <section id="view-research" class="view" hidden>
+    <h2>Research note</h2>
+    <div id="research" class="prose"></div>
+  </section>
+  <section id="view-live" class="view" hidden>
+    <h2>Live tokens — already trading (not ranked)</h2>
+    <p class="note">These protocols already record a token, so they are comparables, not ranking candidates. Shown with market cap from the snapshot.</p>
+    <div class="tablewrap"><table id="liveTable">
+      <thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>Multiple</th></tr></thead>
+      <tbody id="liveRows"></tbody>
+    </table></div>
+  </section>
+</main>
+<footer class="wrap foot">
+  <p>Model fitted from the sealed snapshot only. Gas prices are labelled assumptions, not snapshot data. Token odds is a fitted score, not a launch-date prediction. No airdrop allocation is claimed anywhere — the snapshot carries none.</p>
+</footer>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
