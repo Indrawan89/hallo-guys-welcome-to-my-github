@@ -1,5 +1,3 @@
 input/
-out/
-out-*/
-node_modules/
-*.log
+out*/
+__pycache__/

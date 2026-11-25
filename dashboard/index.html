@@ -1,104 +1,59 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Launch Radar — pre-token protocols ranked by fitted implied value</title>
+<title>Token Launch Radar — fitted implied value for pre-token protocols</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header class="masthead">
-  <div class="title-row">
-    <h1>Token Launch Radar</h1>
-    <span class="asof" id="asof-line"></span>
-  </div>
-  <p class="question">Which pre-token protocols would be worth farming if their token priced like the tokens that already trade — fitted from one public snapshot, nothing hardcoded?</p>
+<header>
+  <h1>Token Launch Radar</h1>
+  <p class="subtitle">Which pre-token protocol's token would be worth the most — and what should a reader do to farm it before it launches?</p>
   <p class="source" id="source-line"></p>
 </header>
-
-<section class="kpis" id="kpi-strip" aria-label="Headline results"></section>
-
-<nav class="tabs" id="tabs">
+<section id="kpi" aria-label="Key results"></section>
+<nav id="tabs" aria-label="Sections">
   <button data-tab="board" class="active">Board</button>
-  <button data-tab="detail">Detail</button>
-  <button data-tab="method">Methodology</button>
-  <button data-tab="census">Census</button>
-  <button data-tab="research">Research note</button>
   <button data-tab="live">Live tokens</button>
+  <button data-tab="method">Methodology</button>
+  <button data-tab="playbooks">Category playbooks</button>
+  <button data-tab="census">Census</button>
+  <button data-tab="note">Research note</button>
 </nav>
-
 <main>
-  <section id="tab-board" class="tab active">
-    <div class="board-tools">
-      <input id="search" type="search" placeholder="Filter by name, slug or category…" aria-label="Filter the board">
-      <div class="scope-filter" id="scope-filter">
-        <button data-scope="all" class="active">All</button>
-        <button data-scope="Watchlist">Watchlist</button>
-        <button data-scope="Early">Early finds</button>
-      </div>
-      <span class="count" id="row-count"></span>
+  <section id="view-board">
+    <div class="controls">
+      <input id="filter-text" type="search" placeholder="Filter by name, slug or category…" aria-label="Filter board">
+      <button data-scope="all" class="scope active">All</button>
+      <button data-scope="Watchlist" class="scope">Watchlist</button>
+      <button data-scope="Early" class="scope">Early finds</button>
+      <span id="row-count"></span>
     </div>
-    <table class="board" id="board-table">
-      <thead>
-        <tr>
-          <th data-sort="rank">#</th>
-          <th data-sort="name">Protocol</th>
-          <th data-sort="scope">Scope</th>
-          <th data-sort="category">Category</th>
-          <th data-sort="tvl_usd" class="num">TVL</th>
-          <th data-sort="change_7d" class="num">7D</th>
-          <th data-sort="odds" class="num">Token odds</th>
-          <th data-sort="implied_value_usd" class="num">Implied value</th>
-          <th class="num">90% band</th>
-        </tr>
-      </thead>
+    <table id="board-table">
+      <thead><tr>
+        <th data-sort="rank">#</th>
+        <th data-sort="name">Protocol</th>
+        <th data-sort="scope">Scope</th>
+        <th data-sort="tvl_usd">TVL</th>
+        <th data-sort="change_7d">7d</th>
+        <th data-sort="odds">Token odds</th>
+        <th data-sort="implied_value_usd">Implied value</th>
+        <th>90% band</th>
+        <th>Conformal 80%</th>
+        <th data-sort="break_even_pct">Break-even</th>
+        <th data-sort="verdict">Verdict</th>
+      </tr></thead>
       <tbody id="board-body"></tbody>
     </table>
-    <p class="recompute" id="recompute-line"></p>
   </section>
-
-  <section id="tab-detail" class="tab">
-    <div class="detail-pick">
-      <label for="detail-select">Protocol</label>
-      <select id="detail-select"></select>
-    </div>
-    <div id="detail-body"></div>
-  </section>
-
-  <section id="tab-method" class="tab">
-    <h2>Methodology</h2>
-    <div id="method-body"></div>
-  </section>
-
-  <section id="tab-census" class="tab">
-    <h2>Census — every protocol in the snapshot, accounted for</h2>
-    <table class="census" id="census-table">
-      <thead><tr><th>Bucket</th><th class="num">Count</th><th>Examples</th></tr></thead>
-      <tbody id="census-body"></tbody>
-    </table>
-    <p class="note" id="census-note"></p>
-  </section>
-
-  <section id="tab-research" class="tab">
-    <h2>Research note</h2>
-    <div id="research-body"></div>
-  </section>
-
-  <section id="tab-live" class="tab">
-    <h2>Live tokens — the comps the curve is fitted on</h2>
-    <p class="note" id="live-note"></p>
-    <table class="board" id="live-table">
-      <thead><tr><th>Protocol</th><th>Symbol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">Multiple</th></tr></thead>
-      <tbody id="live-body"></tbody>
-    </table>
-  </section>
+  <section id="view-detail" hidden></section>
+  <section id="view-live" hidden></section>
+  <section id="view-method" hidden></section>
+  <section id="view-playbooks" hidden></section>
+  <section id="view-census" hidden></section>
+  <section id="view-note" hidden></section>
 </main>
-
-<footer>
-  <p class="audit" id="audit-line"></p>
-  <p class="fine">Implied values are this radar's own fitted claim from the snapshot named above — not a price forecast and not a promise that any token launches. Farm steps are suggestions, not financial advice.</p>
-</footer>
-
+<footer id="audit"></footer>
 <script src="../data.js"></script>
 <script src="recompute.js"></script>
 <script src="app.js"></script>

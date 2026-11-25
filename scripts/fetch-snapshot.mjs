@@ -1,14 +1,12 @@
-// Fetch the DefiLlama protocol list and shape it into this competition's
-// snapshot format: protocols >= $5M TVL, ten fields each, sorted by slug,
-// plus the watchlist produced by the house rule (floor $50M, no token
-// recorded, no parent protocol, no versioned/wrapped/staked/bridged name,
-// no excluded category, no exchange prefix). Node stdlib only.
-import { writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// Fetch the DefiLlama protocol list and write the 10-field snapshot this
+// entry reads. Written fresh for token-radar rebuild5 (25 Nov 2026).
+// Node 22+ stdlib only. Usage: node scripts/fetch-snapshot.mjs [out.json]
+import { writeFileSync } from 'node:fs';
 
+const OUT = process.argv[2] ?? 'input/snapshot.json';
 const FLOOR_USD = 50_000_000;
-const MIN_TVL_USD = 5_000_000;
+const MIN_TVL = 5_000_000;
+const VERSION = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 const EXCLUDED_CATEGORIES = new Set([
   'Bridge',
   'Canonical Bridge',
@@ -17,7 +15,7 @@ const EXCLUDED_CATEGORIES = new Set([
   'Restaked BTC',
   'CEX',
 ]);
-const EXCHANGE_PREFIXES = [
+const EXCHANGE_NAMES = [
   'Binance',
   'Coinbase',
   'Bybit',
@@ -27,120 +25,76 @@ const EXCHANGE_PREFIXES = [
   'Bitfinex',
   'Gemini',
 ];
-const VERSION_SUFFIX = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
-const WRAPPED_WORD = /\b(wrapped|staked|staking)\b/i;
 
-function dayOf(tsSeconds) {
-  const d = new Date(tsSeconds * 1000);
-  return d.toISOString().slice(0, 10);
+function hasWrappedWord(name) {
+  return (name ?? '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .some((w) => w === 'wrapped' || w === 'staked' || w === 'staking');
 }
 
-function cleanSymbol(s) {
-  if (s === null || s === undefined) return null;
-  const t = String(s).trim();
-  return t === '' || t === '-' ? null : t;
+function startsWithExchange(name) {
+  return EXCHANGE_NAMES.some((e) => (name ?? '').startsWith(e));
 }
 
-function cleanGecko(g) {
-  if (g === null || g === undefined) return null;
-  const t = String(g).trim();
-  return t === '' ? null : t;
-}
-
-function onWatchlist(p, raw) {
+/** The house watchlist rule (kit input/README.md): floor, no token, not
+ * versioned, not a wrapped/staked/bridged product of a traded token. */
+function onWatchlist(p) {
   if (p.tvl_usd < FLOOR_USD) return false;
   if (p.gecko_id !== null || p.symbol !== null) return false;
-  if (raw.parentProtocol !== null && raw.parentProtocol !== undefined) return false;
-  if (p.category !== null && EXCLUDED_CATEGORIES.has(p.category)) return false;
-  if (VERSION_SUFFIX.test(p.name)) return false;
-  if (WRAPPED_WORD.test(p.name)) return false;
-  for (const ex of EXCHANGE_PREFIXES) {
-    if (p.name.startsWith(ex)) return false;
-  }
+  if (VERSION.test(p.name)) return false;
+  if (p.parentProtocol) return false;
+  if (EXCLUDED_CATEGORIES.has(p.category)) return false;
+  if (hasWrappedWord(p.name)) return false;
+  if (startsWithExchange(p.name)) return false;
   return true;
 }
 
-async function main() {
-  const url = 'https://api.llama.fi/protocols';
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`fetch ${url} -> HTTP ${res.status}`);
-  const rawList = await res.json();
-  const fetchedAt = new Date().toISOString();
-  const asOf = fetchedAt.slice(0, 10);
+const fetchedAt = new Date();
+const res = await fetch('https://api.llama.fi/protocols');
+if (!res.ok) throw new Error(`DefiLlama HTTP ${res.status}`);
+const raw = await res.json();
 
-  const protocols = [];
-  let droppedNoSlug = 0;
-  for (const raw of rawList) {
-    const slug = raw.slug ?? raw.id ?? null;
-    const name = raw.name ?? null;
-    const tvl = raw.tvl ?? null;
-    if (slug === null || name === null || tvl === null) {
-      droppedNoSlug++;
-      continue;
-    }
-    const tvlUsd = Math.trunc(Number(tvl));
-    if (!Number.isFinite(tvlUsd) || tvlUsd < MIN_TVL_USD) continue;
-    const mcapRaw = raw.mcap ?? null;
-    const mcapUsd =
-      mcapRaw === null || mcapRaw === undefined ? null : Math.trunc(Number(mcapRaw));
-    const changeRaw = raw.change_7d ?? null;
-    const change7d =
-      changeRaw === null || changeRaw === undefined
-        ? null
-        : Math.round(Number(changeRaw) * 10000) / 10000;
-    const listedRaw = raw.listedAt ?? null;
-    const listedAt =
-      listedRaw === null || listedRaw === undefined ? null : dayOf(Number(listedRaw));
-    protocols.push({
-      slug: String(slug),
-      name: String(name),
-      category: raw.category ?? null,
-      chains: Array.isArray(raw.chains) ? raw.chains.map(String) : [],
-      tvl_usd: tvlUsd,
-      change_7d: change7d,
-      mcap_usd: mcapUsd,
-      listed_at: listedAt,
-      gecko_id: cleanGecko(raw.gecko_id),
-      symbol: cleanSymbol(raw.symbol),
-    });
-    // keep the raw record's parentProtocol for the watchlist rule
-    protocols[protocols.length - 1]._parent = raw.parentProtocol ?? null;
-  }
-  protocols.sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
-
-  const bySlug = new Map(protocols.map((p) => [p.slug, p]));
-  const watchlist = [];
-  for (const p of protocols) {
-    const rawParent = p._parent;
-    if (onWatchlist(p, { parentProtocol: rawParent })) watchlist.push(p.slug);
-  }
-  watchlist.sort();
-
-  for (const p of protocols) delete p._parent;
-
-  const snapshot = {
-    as_of: asOf,
-    source: `DefiLlama https://api.llama.fi/protocols, fetched ${fetchedAt}`,
-    floor_usd: FLOOR_USD,
-    protocols,
-    watchlist,
-  };
-
-  const here = dirname(fileURLToPath(import.meta.url));
-  const root = join(here, '..');
-  mkdirSync(join(root, 'input'), { recursive: true });
-  const outPath = join(root, 'input', 'snapshot.json');
-  writeFileSync(outPath, JSON.stringify(snapshot, null, 2) + '\n');
-  const traded = protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0).length;
-  const noToken = protocols.filter((p) => p.mcap_usd === null).length;
-  const cats = new Set(protocols.map((p) => p.category).filter((c) => c !== null)).size;
-  console.log(`fetched ${rawList.length} raw records, dropped ${droppedNoSlug} without slug/name/tvl`);
-  console.log(`protocols >= $5M: ${protocols.length}, watchlist: ${watchlist.length}`);
-  console.log(`traded (mcap>0): ${traded}, no-token (mcap null): ${noToken}, categories: ${cats}`);
-  console.log(`as_of ${asOf}, wrote ${outPath}`);
+const protocols = [];
+for (const r of raw) {
+  const tvl = typeof r.tvl === 'number' ? Math.trunc(r.tvl) : 0;
+  if (!r.slug || !r.name || tvl < MIN_TVL) continue;
+  const change7d =
+    typeof r.change_7d === 'number' ? Math.round(r.change_7d * 1e4) / 1e4 : null;
+  const mcap =
+    typeof r.mcap === 'number' ? Math.trunc(r.mcap) : null;
+  const listedAt =
+    typeof r.listedAt === 'number'
+      ? new Date(r.listedAt * 1000).toISOString().slice(0, 10)
+      : null;
+  protocols.push({
+    slug: r.slug,
+    name: r.name,
+    category: typeof r.category === 'string' ? r.category : null,
+    chains: Array.isArray(r.chains) ? r.chains : [],
+    tvl_usd: tvl,
+    change_7d: change7d,
+    mcap_usd: mcap,
+    listed_at: listedAt,
+    gecko_id: typeof r.gecko_id === 'string' ? r.gecko_id : null,
+    symbol:
+      typeof r.symbol === 'string' && r.symbol !== '-' ? r.symbol : null,
+    parentProtocol: r.parentProtocol ?? null,
+  });
 }
+protocols.sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+const watchlist = protocols.filter(onWatchlist).map((p) => p.slug);
+const asOf = fetchedAt.toISOString().slice(0, 10);
+const snapshot = {
+  as_of: asOf,
+  source: `DefiLlama https://api.llama.fi/protocols, fetched ${fetchedAt.toISOString()}`,
+  floor_usd: FLOOR_USD,
+  protocols: protocols.map(({ parentProtocol: _pp, ...ten }) => ten),
+  watchlist,
+};
+writeFileSync(OUT, `${JSON.stringify(snapshot, null, 2)}\n`);
+const traded = protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0).length;
+process.stdout.write(
+  `fetch-snapshot: ${protocols.length} protocols >= $5M, watchlist ${watchlist.length}, traded ${traded}, as_of ${asOf}\n`,
+);

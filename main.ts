@@ -1,222 +1,118 @@
-// Token-radar entrypoint, written fresh for rebuild4.
-// Reads a DefiLlama snapshot, fits the model (lib/model.ts), and writes
-// /output: board.json, data.js (the page's data), dashboard/, screenshots/
-// (copied from the repository) and dossier.json (when screenshots exist).
-// Node standard library only; deterministic: no timestamps in any output.
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+// Token-radar rebuild5 entrypoint (Node 22, standard library only).
+//
+// Reads the sealed snapshot from /input/snapshot.json (or --input), scores
+// every pre-token protocol with the model in lib/model.ts, writes the ranked
+// board to /output/board.json, the dashboard's data to /output/data.js,
+// copies dashboard/ and screenshots/ to /output, and writes
+// /output/dossier.json with the vendored make.fun library.
+//
+// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
+//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input input/snapshot.json
+
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildBoard, loadSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, censusOf, dataScript, parseSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
-const REPO_ROOT = dirname(fileURLToPath(import.meta.url));
+const here = fileURLToPath(new URL('.', import.meta.url));
 
-function parseArgs(argv: string[]): { input: string; output: string } {
-  let input = process.env.MAKEFUN_INPUT ?? '/input/snapshot.json';
-  let output = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--input' && argv[i + 1]) input = argv[++i]!;
-    else if (argv[i] === '--output' && argv[i + 1]) output = argv[++i]!;
-  }
-  return { input, output };
+const TEXT_MAX_BYTES = 65_536;
+const SCREENSHOT_CAPS = { max: 4, max_bytes: 524_288 };
+const IMAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+
+function arg(name: string, fallback: string): string {
+  const at = process.argv.indexOf(`--${name}`);
+  if (at >= 0 && at + 1 < process.argv.length) return process.argv[at + 1]!;
+  const withEquals = process.argv.find((a) => a.startsWith(`--${name}=`));
+  return withEquals === undefined ? fallback : withEquals.slice(name.length + 3);
 }
 
-function copyTree(src: string, dst: string): number {
-  mkdirSync(dst, { recursive: true });
-  let n = 0;
-  for (const e of readdirSync(src, { withFileTypes: true })) {
-    const s = join(src, e.name);
-    const d = join(dst, e.name);
-    if (e.isDirectory()) n += copyTree(s, d);
-    else if (e.isFile()) {
-      copyFileSync(s, d);
-      n++;
-    }
-  }
-  return n;
+function fail(message: string): never {
+  process.stderr.write(`token radar: ${message}\n`);
+  process.exit(1);
 }
 
-function fail(msg: string): never {
-  throw new Error(`gate failed: ${msg}`);
+const inputArg = arg('input', '/input');
+const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
+if (!existsSync(inputFile)) {
+  fail(`no snapshot at ${inputFile}: pass --input <snapshot.json|directory> or mount the sealed /input`);
+}
+const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
+
+const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
+const { board, radar } = buildRadar(snapshot);
+
+// Hard gates before writing anything.
+const issue = boardIssue(board, snapshot);
+if (issue !== null) fail(`the model wrote a board the gate refuses: ${issue}`);
+const census = censusOf(snapshot);
+const censusSum = census.buckets.reduce((s, b) => s + b.count, 0);
+if (censusSum !== census.total) {
+  fail(`census sums to ${censusSum}, snapshot holds ${census.total}`);
+}
+const covered = new Set(board.map((r) => r.slug));
+if (snapshot.watchlist.some((s) => !covered.has(s))) {
+  fail('the board does not cover the whole watchlist');
+}
+for (const row of board) {
+  if (!Number.isFinite(row.odds) || !Number.isFinite(row.implied_value_usd)) {
+    fail(`row ${row.slug} carries a non-finite value`);
+  }
 }
 
-function main(): void {
-  const { input, output } = parseArgs(process.argv.slice(2));
-  const snapshot = loadSnapshot(input);
-  const built = buildBoard(snapshot);
-  const { rows, liveTokens, census, fit } = built;
+mkdirSync(out, { recursive: true });
+writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
+writeFileSync(join(out, 'data.js'), dataScript(radar));
 
-  // ---- hard gates: refuse to write a bad board ----
-  const watchSet = new Set(snapshot.watchlist);
-  const rowSlugs = new Set(rows.map((r) => r.slug));
-  for (const w of watchSet) {
-    if (!rowSlugs.has(w)) fail(`watchlist ${w} missing from the board`);
+function copyFiles(from: string, to: string): string[] {
+  if (!existsSync(from)) return [];
+  mkdirSync(to, { recursive: true });
+  const copied: string[] = [];
+  for (const name of readdirSync(from)) {
+    if (name.startsWith('.')) continue;
+    const path = join(from, name);
+    if (!statSync(path).isFile()) continue;
+    copyFileSync(path, join(to, name));
+    copied.push(name);
   }
-  if (rows.length < 100 || rows.length > 4000) fail(`board has ${rows.length} rows`);
-  rows.forEach((r, i) => {
-    if (r.rank !== i + 1) fail(`row ${r.slug} has rank ${r.rank}, expected ${i + 1}`);
-    if (!Number.isInteger(r.implied_value_usd) || r.implied_value_usd <= 0) {
-      fail(`row ${r.slug} has a bad implied value`);
-    }
-    if (i > 0 && r.implied_value_usd > rows[i - 1]!.implied_value_usd) {
-      fail(`board not sorted by value at rank ${r.rank}`);
-    }
-    if (!Array.isArray(r.farm_steps) || r.farm_steps.length < 3 || r.farm_steps.length > 12) {
-      fail(`row ${r.slug} has ${r.farm_steps.length} farm steps`);
-    }
-    for (const s of r.farm_steps) {
-      const t = s.trim();
-      if (t.length < 20 || t.length > 600) fail(`row ${r.slug} has a farm step of ${t.length} chars`);
-    }
-  });
-  if (new Set(rows.map((r) => r.implied_value_usd)).size < 2) {
-    fail('all implied values are equal: not a ranking');
-  }
-  const censusSum = census.reduce((s, b) => s + b.count, 0);
-  if (censusSum !== snapshot.protocols.length) {
-    fail(`census sums to ${censusSum}, snapshot has ${snapshot.protocols.length}`);
-  }
-  const watchCovered = rows.filter((r) => r.scope === 'Watchlist').length;
-  if (watchCovered !== snapshot.watchlist.length) {
-    fail(`board covers ${watchCovered} watchlist rows, snapshot lists ${snapshot.watchlist.length}`);
-  }
-
-  mkdirSync(output, { recursive: true });
-
-  // ---- board.json ----
-  const board = {
-    rows: rows.map((r) => ({
-      slug: r.slug,
-      name: r.name,
-      rank: r.rank,
-      implied_value_usd: r.implied_value_usd,
-      farm_steps: r.farm_steps,
-      category: r.category,
-      chains: r.chains,
-      tvl_usd: r.tvl_usd,
-      change_7d: r.change_7d,
-      scope: r.scope,
-      fitted_mcap_usd: r.fitted_mcap_usd,
-      odds: r.odds,
-      band_low_usd: r.band_low_usd,
-      band_high_usd: r.band_high_usd,
-      gas_usd: r.gas_usd,
-      net_expected_usd: r.net_expected_usd,
-      exit_trigger: r.exit_trigger,
-      nearest: r.nearest,
-    })),
-  };
-  writeFileSync(join(output, 'board.json'), JSON.stringify(board, null, 2) + '\n');
-
-  // ---- data.js: everything the page renders (inputs + fitted numbers) ----
-  const data = {
-    meta: {
-      as_of: snapshot.as_of,
-      source: snapshot.source,
-      floor_usd: snapshot.floor_usd,
-      protocols: snapshot.protocols.length,
-      watchlist: snapshot.watchlist.length,
-      rows: rows.length,
-      watchlist_rows: watchCovered,
-      early_rows: rows.length - watchCovered,
-      total_implied_usd: built.totalImplied,
-    },
-    curve: {
-      a: fit.curveA,
-      b: fit.curveB,
-      r2: fit.curveR2,
-      rmse: fit.curveRmse,
-      loo_rmse: fit.curveLoo,
-      loo_multiple: fit.looMultiple,
-      flat_multiple: fit.flatMultiple,
-      flat_rmse: fit.flatRmse,
-      comps: fit.compsAfter,
-      duplicates_dropped: fit.duplicatesDropped,
-      huber_iterations: fit.huberIterations,
-    },
-    validation: {
-      multi_r2: fit.multiR2,
-      multi_loo: fit.multiLoo,
-      multi_ablation: fit.multiAblation,
-      holdout_cutoff: fit.holdoutCutoff,
-      holdout_n_fit: fit.holdoutNfit,
-      holdout_n_test: fit.holdoutNtest,
-      holdout_r2: fit.holdoutR2,
-      holdout_rmse: fit.holdoutRmse,
-      holdout_flat_rmse: fit.holdoutFlatRmse,
-      walk_forward: fit.walkForward,
-      walk_forward_pooled: fit.walkForwardPooled,
-      within3_in_sample: fit.within3InSample,
-      within3_loo: fit.within3Loo,
-      within2_in_sample: fit.within2InSample,
-      within2_loo: fit.within2Loo,
-      bootstrap_slope_low: fit.bootstrapSlopeLow,
-      bootstrap_slope_high: fit.bootstrapSlopeHigh,
-      bootstrap_intercept_low: fit.bootstrapInterceptLow,
-      bootstrap_intercept_high: fit.bootstrapInterceptHigh,
-      odds_n: fit.oddsN,
-      odds_positives: fit.oddsPositives,
-      odds_auc: fit.oddsAuc,
-      odds_age_or: fit.oddsAgeOr,
-      odds_tvl_or: fit.oddsTvlOr,
-      odds_7d_or_per_10pts: fit.odds7dOr,
-      odds_ablation: fit.oddsAblation,
-      odds_7d_winsorized: fit.odds7dWinsorized,
-    },
-    recompute: built.recompute,
-    rows: rows.map((r) => ({
-      slug: r.slug,
-      name: r.name,
-      category: r.category,
-      chains: r.chains,
-      tvl_usd: r.tvl_usd,
-      change_7d: r.change_7d,
-      age_years: r.age_years,
-      scope: r.scope,
-      rank: r.rank,
-      fitted_mcap_usd: r.fitted_mcap_usd,
-      odds: r.odds,
-      implied_value_usd: r.implied_value_usd,
-      band_low_usd: r.band_low_usd,
-      band_high_usd: r.band_high_usd,
-      gas_usd: r.gas_usd,
-      gas_drag_pct: r.gas_drag_pct,
-      net_expected_usd: r.net_expected_usd,
-      exit_trigger: r.exit_trigger,
-      farm_steps: r.farm_steps,
-      nearest: r.nearest,
-    })),
-    live_tokens: liveTokens,
-    census,
-  };
-  writeFileSync(join(output, 'data.js'), `window.TOKEN_RADAR = ${JSON.stringify(data, null, 2)};\n`);
-
-  // ---- dashboard + screenshots ----
-  const dashFiles = copyTree(join(REPO_ROOT, 'dashboard'), join(output, 'dashboard'));
-  let shotCount = 0;
-  const shotsSrc = join(REPO_ROOT, 'screenshots');
-  if (existsSync(shotsSrc)) {
-    shotCount = copyTree(shotsSrc, join(output, 'screenshots'));
-  }
-
-  // ---- dossier (only once screenshots exist) ----
-  let dossierBytes = 0;
-  if (shotCount >= 3) {
-    const dossier = buildDossier(output, { text_max_bytes: 65536 });
-    writeFileSync(join(output, 'dossier.json'), dossier);
-    dossierBytes = dossier.length;
-  } else {
-    console.log(`note: ${shotCount} screenshots in the repo, dossier skipped (need 3)`);
-  }
-
-  const top3 = rows.slice(0, 3).map((r) => `${r.name} $${r.implied_value_usd.toLocaleString('en-US')}`);
-  console.log(`rows: ${rows.length} (${watchCovered} watchlist + ${rows.length - watchCovered} early)`);
-  console.log(`top 3: ${top3.join(' · ')}`);
-  console.log(`total implied: $${built.totalImplied.toLocaleString('en-US')}`);
-  console.log(
-    `curve: log10(mcap) = ${fit.curveA.toFixed(4)} + ${fit.curveB.toFixed(4)}·log10(TVL), R² ${fit.curveR2.toFixed(3)}, LOO ${fit.looMultiple.toFixed(2)}×, odds AUC ${fit.oddsAuc.toFixed(3)}`,
-  );
-  console.log(`dashboard files copied: ${dashFiles}, screenshots copied: ${shotCount}, dossier: ${dossierBytes} bytes`);
+  return copied;
 }
 
-main();
+copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
+const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
+if (shots.length < 3) {
+  fail(`screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view`);
+}
+for (const name of shots) {
+  if (!IMAGE_NAME.test(name)) fail(`screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters`);
+}
+
+writeFileSync(
+  join(out, 'dossier.json'),
+  buildDossier(out, {
+    text_max_bytes: TEXT_MAX_BYTES,
+    screenshots: SCREENSHOT_CAPS,
+    dashboard: { max_files: 400, max_bytes: 4_194_304 },
+  }),
+);
+
+const verdicts = {
+  FARM: board.filter((r) => r.verdict === 'FARM').length,
+  WATCH: board.filter((r) => r.verdict === 'WATCH').length,
+  SKIP: board.filter((r) => r.verdict === 'SKIP').length,
+};
+process.stdout.write(
+  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.kpi.earlyRows} early, ${radar.live.length} live set aside)\n` +
+    `token radar: curve log10(mcap) = ${radar.model.curve.a.toFixed(4)} + ${radar.model.curve.b.toFixed(4)} log10(TVL), R2 ${radar.model.curve.r2.toFixed(3)}, LOO ${radar.model.loo.ratio.toFixed(2)}x, odds AUC ${radar.model.odds.auc.toFixed(3)}\n` +
+    `token radar: verdicts FARM ${verdicts.FARM} / WATCH ${verdicts.WATCH} / SKIP ${verdicts.SKIP}, total implied $${radar.kpi.totalImpliedUsd.toLocaleString('en-US')}\n` +
+    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
+);
