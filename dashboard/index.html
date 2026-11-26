@@ -2,18 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Token Launch Radar — fitted implied value for pre-token protocols</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Launch Radar — fitted value, costed farm verdicts</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <header>
-  <h1>Token Launch Radar</h1>
-  <p class="subtitle">Which pre-token protocol's token would be worth the most — and what should a reader do to farm it before it launches?</p>
-  <p class="source" id="source-line"></p>
+  <div>
+    <h1>Token Launch Radar</h1>
+    <p class="sub">Every protocol that records no token, ranked by a fitted implied value, with a costed farm verdict on each row. <span id="snapLine"></span></p>
+  </div>
+  <div class="src">Source: DefiLlama public API, sealed house snapshot.<br>Built by an AI agent for make.fun's Token Radar bounty.</div>
 </header>
-<section id="kpi" aria-label="Key results"></section>
-<nav id="tabs" aria-label="Sections">
-  <button data-tab="board" class="active">Board</button>
+<section id="kpis" aria-label="Key numbers"></section>
+<nav id="tabs">
+  <button data-tab="board" class="on">Board</button>
   <button data-tab="live">Live tokens</button>
   <button data-tab="method">Methodology</button>
   <button data-tab="playbooks">Category playbooks</button>
@@ -21,41 +24,70 @@
   <button data-tab="note">Research note</button>
 </nav>
 <main>
-  <section id="view-board">
-    <div class="controls">
-      <input id="filter-text" type="search" placeholder="Filter by name, slug or category…" aria-label="Filter board">
-      <button data-scope="all" class="scope active">All</button>
-      <button data-scope="Watchlist" class="scope">Watchlist</button>
-      <button data-scope="Early" class="scope">Early finds</button>
-      <span id="row-count"></span>
+  <section id="tab-board" class="panel on">
+    <div class="filters">
+      <input id="q" type="search" placeholder="Filter by name or category…" aria-label="Filter board">
+      <select id="fScope" aria-label="Scope filter">
+        <option value="">All scopes</option>
+        <option value="watchlist">Watchlist only</option>
+        <option value="early">Early finds only</option>
+      </select>
+      <select id="fVerdict" aria-label="Verdict filter">
+        <option value="">All verdicts</option>
+        <option value="FARM">FARM</option>
+        <option value="WATCH">WATCH</option>
+        <option value="SKIP">SKIP</option>
+      </select>
+      <span id="rowCount"></span>
     </div>
-    <table id="board-table">
+    <table id="boardTable">
       <thead><tr>
-        <th data-sort="rank">#</th>
-        <th data-sort="name">Protocol</th>
-        <th data-sort="scope">Scope</th>
-        <th data-sort="tvl_usd">TVL</th>
-        <th data-sort="change_7d">7d</th>
-        <th data-sort="odds">Token odds</th>
-        <th data-sort="implied_value_usd">Implied value</th>
-        <th>90% band</th>
-        <th>Conformal 80%</th>
-        <th data-sort="break_even_pct">Break-even</th>
-        <th data-sort="verdict">Verdict</th>
+        <th data-k="0">#</th><th data-k="1">Protocol</th><th data-k="2">Scope</th><th data-k="3">Category</th>
+        <th data-k="4" class="num">TVL</th><th data-k="5" class="num">7D</th><th data-k="6" class="num">Odds</th>
+        <th data-k="7" class="num">Implied value</th><th data-k="8" class="num">Range (90% · conf 80%)</th><th data-k="9">Verdict</th>
       </tr></thead>
-      <tbody id="board-body"></tbody>
+      <tbody id="boardBody"></tbody>
+    </table>
+    <p class="hint">Click any row for its detail view: range, anchor, net expected, break-even deposit and farm steps. Click a column header to sort.</p>
+  </section>
+  <section id="tab-detail" class="panel">
+    <p><a href="#board" id="backLink">← Back to the board</a></p>
+    <div id="detailBody"></div>
+  </section>
+  <section id="tab-live" class="panel">
+    <h2>Live tokens — the traded comps the curve is fitted on</h2>
+    <p class="lede">One row per ticker, <span id="liveCount"></span>. The curve is fitted on these: each one's market cap against its TVL. Click a column header to sort.</p>
+    <table id="liveTable">
+      <thead><tr>
+        <th data-k="0">Protocol</th><th data-k="1" class="num">TVL</th><th data-k="2" class="num">Market cap</th>
+        <th data-k="3" class="num">Multiple</th><th data-k="4">Listed</th><th data-k="5" class="num">Age (yrs)</th>
+      </tr></thead>
+      <tbody id="liveBody"></tbody>
     </table>
   </section>
-  <section id="view-detail" hidden></section>
-  <section id="view-live" hidden></section>
-  <section id="view-method" hidden></section>
-  <section id="view-playbooks" hidden></section>
-  <section id="view-census" hidden></section>
-  <section id="view-note" hidden></section>
+  <section id="tab-method" class="panel">
+    <h2>Methodology — every number, defined</h2>
+    <div id="methodBody"></div>
+  </section>
+  <section id="tab-playbooks" class="panel">
+    <h2>Category playbooks — what to do, per kind of protocol</h2>
+    <p class="lede">Each playbook is a 90-day plan on a $10,000 deposit: about 26 hours of attention, $48 of gas counted inside the net. Expected $/hour is net expected divided by 26 hours.</p>
+    <div id="playbookBody"></div>
+    <h3>Deposit-tier matrix — expected return on the top FARM rows</h3>
+    <p class="lede">Net expected scales with the deposit (the farmer share is 0.01% of implied value per $10,000); the $48 gas does not, so small deposits clear the bar less often.</p>
+    <div id="matrixBody"></div>
+  </section>
+  <section id="tab-census" class="panel">
+    <h2>Census — all 758 protocols accounted for</h2>
+    <div id="censusBody"></div>
+  </section>
+  <section id="tab-note" class="panel">
+    <h2>Research note</h2>
+    <div id="noteBody"></div>
+  </section>
 </main>
 <footer id="audit"></footer>
-<script src="../data.js"></script>
-<script src="recompute.js"></script>
+<script src="data.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
